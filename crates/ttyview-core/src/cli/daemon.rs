@@ -14,7 +14,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 pub async fn run(addr: SocketAddr, socket: Option<&str>, rows: u16, cols: u16) -> Result<()> {
-    run_with_options(addr, socket, rows, cols, None, None, None).await
+    run_with_options(addr, socket, rows, cols, None, None, None, None).await
 }
 
 pub async fn run_with_tls(
@@ -25,7 +25,7 @@ pub async fn run_with_tls(
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<()> {
-    run_with_options(addr, socket, rows, cols, tls_cert, tls_key, None).await
+    run_with_options(addr, socket, rows, cols, tls_cert, tls_key, None, None).await
 }
 
 pub async fn run_with_options(
@@ -36,7 +36,15 @@ pub async fn run_with_options(
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
     diag_log: Option<&Path>,
+    registry_url: Option<&str>,
 ) -> Result<()> {
+    // Install rustls crypto provider once. axum-server (TLS) and reqwest
+    // (outbound HTTPS for the remote registry) both use rustls 0.23+,
+    // which refuses to pick a default provider when more than one is
+    // available. Calling install_default() on first run fixes that;
+    // .ok() ignores the second-call error when something else (a test
+    // harness, a future caller) has already installed one.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     info!("panel daemon starting; tmux socket = {:?}; bind = {addr}", socket);
     let mut store = PaneStore::new(rows, cols);
     store.set_tmux_socket(socket.map(String::from));
@@ -85,6 +93,7 @@ pub async fn run_with_options(
             std::collections::HashMap::new(),
         )),
         diag_log_path: diag_log.map(|p| p.to_path_buf()),
+        registry_url: registry_url.map(String::from),
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {

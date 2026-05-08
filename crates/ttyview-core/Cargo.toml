@@ -34,6 +34,15 @@ tower-http = { version = "0.6", features = ["fs"] }
 dashmap = "6"
 rust-embed = { version = "8", features = ["debug-embed"] }
 mime_guess = "2"
+# Outbound HTTP for the optional remote plugin registry. rustls-tls keeps
+# release binaries free of OpenSSL system deps; default features off
+# avoids pulling in a second tokio runtime selector.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+# rustls 0.23+ requires an explicit CryptoProvider when more than one
+# rustls-using dep is present (axum-server + reqwest both pull it in
+# with different default providers, leaving the runtime no way to
+# disambiguate). Pinned to ring + installed in `daemon::run_with_options`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["json", "yaml"] }

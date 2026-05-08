@@ -113,32 +113,112 @@ fn now_ms() -> u64 {
 
 // === Registry handlers ===
 
-async fn get_registry() -> Result<Response, StatusCode> {
+async fn get_registry(State(app): State<Arc<AppState>>) -> Result<Response, StatusCode> {
+    // If a remote registry URL is configured, try it first; fall back to
+    // the bundle on any error (network failure, non-200, parse error).
+    // The fallback is deliberate — a misconfigured URL shouldn't break
+    // the Discover tab entirely.
+    if let Some(url) = &app.registry_url {
+        match fetch_remote_json(url).await {
+            Ok(bytes) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::CACHE_CONTROL, "no-store")
+                    .header("x-ttyview-registry-source", "remote")
+                    .body(axum::body::Body::from(bytes))
+                    .unwrap());
+            }
+            Err(e) => {
+                tracing::warn!(target: "ttyview::plugins",
+                    "remote registry fetch failed ({url}); falling back to bundled: {e}");
+            }
+        }
+    }
     let entry = CommunityPlugins::get("registry.json").ok_or(StatusCode::NOT_FOUND)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::CACHE_CONTROL, "no-store")
+        .header("x-ttyview-registry-source", "bundled")
         .body(axum::body::Body::from(entry.data.into_owned()))
         .unwrap())
 }
 
-/// Serve a bundled plugin's JS source. The :id corresponds to the `id`
-/// field in registry.json; we look up the matching `source` filename
-/// instead of trusting the URL path so an attacker can't `../` out.
-async fn get_registry_source(Path(id): Path<String>) -> Result<Response, StatusCode> {
-    let registry = load_registry().await?;
+async fn fetch_remote_json(url: &str) -> Result<Vec<u8>, String> {
+    let resp = reqwest::Client::builder()
+        .user_agent("ttyview-daemon")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("build client: {e}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("send {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} from {url}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+    // Cheap validity check — registry must parse as the expected shape
+    // before we hand it to the client. Otherwise fall back to bundle.
+    serde_json::from_slice::<RegistryFile>(&bytes)
+        .map_err(|e| format!("registry parse failed: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
+async fn fetch_remote_text(url: &str) -> Result<Vec<u8>, String> {
+    let resp = reqwest::Client::builder()
+        .user_agent("ttyview-daemon")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("build client: {e}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("send {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} from {url}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+    Ok(bytes.to_vec())
+}
+
+/// Serve a bundled OR remote plugin's JS source. The :id corresponds
+/// to the `id` field in the active registry (remote if configured,
+/// bundle otherwise). For each entry, the `source` field is either:
+///   - a relative filename → served from the bundled community-plugins
+///     directory (anti-traversal: looked up via the registry, never
+///     directly from the URL path)
+///   - an absolute http(s) URL → fetched and proxied through the daemon
+///     so the client doesn't need to deal with CORS / cross-origin TLS
+async fn get_registry_source(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, StatusCode> {
+    let registry = load_registry(app.clone()).await?;
     let entry = registry
         .plugins
         .iter()
         .find(|p| p.id == id)
         .ok_or(StatusCode::NOT_FOUND)?;
-    let asset = CommunityPlugins::get(&entry.source).ok_or(StatusCode::NOT_FOUND)?;
+    let body = if entry.source.starts_with("http://") || entry.source.starts_with("https://") {
+        match fetch_remote_text(&entry.source).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(target: "ttyview::plugins",
+                    "remote source fetch failed ({}): {e}", entry.source);
+                return Err(StatusCode::BAD_GATEWAY);
+            }
+        }
+    } else {
+        let asset = CommunityPlugins::get(&entry.source).ok_or(StatusCode::NOT_FOUND)?;
+        asset.data.into_owned()
+    };
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/javascript")
         .header(header::CACHE_CONTROL, "no-store")
-        .body(axum::body::Body::from(asset.data.into_owned()))
+        .body(axum::body::Body::from(body))
         .unwrap())
 }
 
@@ -161,7 +241,15 @@ struct RegistryFile {
     plugins: Vec<RegistryEntry>,
 }
 
-async fn load_registry() -> Result<RegistryFile, StatusCode> {
+async fn load_registry(app: Arc<AppState>) -> Result<RegistryFile, StatusCode> {
+    if let Some(url) = &app.registry_url {
+        if let Ok(bytes) = fetch_remote_json(url).await {
+            if let Ok(reg) = serde_json::from_slice::<RegistryFile>(&bytes) {
+                return Ok(reg);
+            }
+        }
+        // fall through to bundled
+    }
     let entry = CommunityPlugins::get("registry.json").ok_or(StatusCode::NOT_FOUND)?;
     serde_json::from_slice(&entry.data).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -202,24 +290,33 @@ struct InstallResp {
 }
 
 async fn install_plugin(
-    State(_app): State<Arc<AppState>>,
+    State(app): State<Arc<AppState>>,
     Json(req): Json<InstallReq>,
 ) -> impl IntoResponse {
-    match install_inner(&req.id).await {
+    match install_inner(app, &req.id).await {
         Ok(plugin) => (StatusCode::OK, Json(InstallResp { ok: true, plugin: Some(plugin), error: None })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(InstallResp { ok: false, plugin: None, error: Some(e) })),
     }
 }
 
-async fn install_inner(id: &str) -> Result<InstalledPlugin, String> {
-    let registry = load_registry().await.map_err(|s| format!("load registry: {s:?}"))?;
+async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, String> {
+    let registry = load_registry(app).await.map_err(|s| format!("load registry: {s:?}"))?;
     let entry = registry
         .plugins
         .iter()
         .find(|p| p.id == id)
         .ok_or_else(|| format!("registry: no plugin with id {id}"))?;
-    let asset = CommunityPlugins::get(&entry.source)
-        .ok_or_else(|| format!("registry: source file {} not in bundle", entry.source))?;
+    // Resolve the source — either fetch a remote URL or read from the
+    // bundled assets. Either path produces a Vec<u8> we then write.
+    let bytes: Vec<u8> = if entry.source.starts_with("http://") || entry.source.starts_with("https://") {
+        fetch_remote_text(&entry.source).await
+            .map_err(|e| format!("fetch remote source {}: {e}", entry.source))?
+    } else {
+        CommunityPlugins::get(&entry.source)
+            .ok_or_else(|| format!("registry: source file {} not in bundle", entry.source))?
+            .data
+            .into_owned()
+    };
 
     let dir = plugins_dir();
     fs::create_dir_all(&dir)
@@ -230,7 +327,7 @@ async fn install_inner(id: &str) -> Result<InstalledPlugin, String> {
     // collisions if two registry plugins shipped with the same source name.
     let installed_filename = format!("{id}.js");
     let path = dir.join(&installed_filename);
-    fs::write(&path, asset.data.as_ref())
+    fs::write(&path, &bytes)
         .await
         .map_err(|e| format!("write {}: {e}", path.display()))?;
 

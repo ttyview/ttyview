@@ -45,6 +45,12 @@ pub struct AppState {
     /// (timings, event types, sizes) — never cell content or input
     /// text — so logging is safe by construction.
     pub diag_log_path: Option<std::path::PathBuf>,
+    /// If set, GET /plugins/registry fetches from this URL instead of
+    /// (or with fallback to) the bundled registry. Lets users point
+    /// the daemon at any catalog — the official ttyview/community-
+    /// plugins repo, a private fork, a local development server. Empty
+    /// = bundled-only (the v1 default).
+    pub registry_url: Option<String>,
 }
 
 pub fn router(state: AppState) -> Router {

@@ -45,6 +45,17 @@ struct Cli {
     /// sizes), NEVER cell content or user input.
     #[arg(long)]
     diag_log: Option<PathBuf>,
+
+    /// URL of a community plugin registry. When set, GET /plugins/registry
+    /// fetches from this URL (with the bundled registry as fallback on
+    /// any failure). Useful pointers:
+    ///   - The official catalog (when it ships): https://raw.githubusercontent.com/ttyview/community-plugins/main/registry.json
+    ///   - A private fork
+    ///   - A local dev server
+    /// Each plugin's `source` field can be either a relative filename
+    /// (resolved against the bundle) or an absolute http(s) URL.
+    #[arg(long)]
+    registry_url: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -65,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         cli.tls_cert.as_deref(),
         cli.tls_key.as_deref(),
         cli.diag_log.as_deref(),
+        cli.registry_url.as_deref(),
     )
     .await
 }
