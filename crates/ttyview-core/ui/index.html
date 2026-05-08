@@ -5,24 +5,37 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
 <title>ttyview</title>
 <style>
-  :root { color-scheme: dark; }
+  /* Theme variables — plugins set these via window.ttyview.contributes.theme().
+     Defaults match the original "VS Code Dark"-ish palette this project shipped
+     with. A theme plugin overrides the ones it cares about; missing vars fall
+     back to these. */
+  :root {
+    color-scheme: dark;
+    --ttv-bg: #1e1e1e;
+    --ttv-fg: #d4d4d4;
+    --ttv-bg-elev: #0d0d0d;
+    --ttv-bg-elev2: #1a1a1a;
+    --ttv-border: #2a2a2a;
+    --ttv-accent: #6ed29a;
+    --ttv-muted: #888;
+  }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; background: #1e1e1e; color: #d4d4d4; font-family: system-ui, sans-serif; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--ttv-bg); color: var(--ttv-fg); font-family: system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
 
   header {
     flex: none;
     padding: 6px 8px;
-    background: #0d0d0d;
+    background: var(--ttv-bg-elev);
     border-bottom: 1px solid #333;
     display: flex; align-items: center; gap: 4px;
     font-size: 13px;
   }
-  header .title { font-weight: 600; color: #6ed29a; }
+  header .title { font-weight: 600; color: var(--ttv-accent); }
   header .sep { color: #666; }
   header select, header button {
     background: #2d2d2d;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
     border: 1px solid #444;
     border-radius: 4px;
     padding: 4px 8px;
@@ -39,7 +52,7 @@
   header #more-menu-panel {
     position: absolute; top: 100%; right: 0;
     margin-top: 4px;
-    background: #1a1a1a;
+    background: var(--ttv-bg-elev2);
     border: 1px solid #444;
     border-radius: 6px;
     padding: 6px;
@@ -57,7 +70,7 @@
   }
   header #more-menu-panel .row {
     display: flex; gap: 4px;
-    border-bottom: 1px solid #2a2a2a;
+    border-bottom: 1px solid var(--ttv-border);
     padding-bottom: 6px; margin-bottom: 2px;
   }
   header #more-menu-panel .row:last-child {
@@ -72,7 +85,7 @@
     display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 10px;
     background: #2d2d2d;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
     border: 1px solid #444;
     border-radius: 4px;
     font: inherit;
@@ -84,7 +97,7 @@
     flex: 1;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  #pane-picker-btn .chev { color: #888; font-size: 0.8em; }
+  #pane-picker-btn .chev { color: var(--ttv-muted); font-size: 0.8em; }
 
   /* Settings overlay — full-page modal listing plugins, theme, etc. */
   #settings-overlay {
@@ -104,8 +117,8 @@
   #settings-panel {
     width: min(640px, 100vw);
     height: min(720px, 100vh);
-    background: #1a1a1a;
-    border: 1px solid #2a2a2a;
+    background: var(--ttv-bg-elev2);
+    border: 1px solid var(--ttv-border);
     border-radius: 8px;
     display: flex; flex-direction: column;
     overflow: hidden;
@@ -130,13 +143,13 @@
     flex: none;
     display: flex; align-items: center; gap: 8px;
     padding: 12px 16px;
-    border-bottom: 1px solid #2a2a2a;
-    background: #0d0d0d;
+    border-bottom: 1px solid var(--ttv-border);
+    background: var(--ttv-bg-elev);
   }
-  #settings-header .title { flex: 1; font-weight: 600; color: #d4d4d4; font-size: 16px; }
+  #settings-header .title { flex: 1; font-weight: 600; color: var(--ttv-fg); font-size: 16px; }
   #settings-close {
     background: transparent;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
     border: none;
     font-size: 22px;
     cursor: pointer;
@@ -148,32 +161,32 @@
     flex: none;
     display: flex; gap: 2px;
     padding: 8px 8px 0;
-    border-bottom: 1px solid #2a2a2a;
-    background: #0d0d0d;
+    border-bottom: 1px solid var(--ttv-border);
+    background: var(--ttv-bg-elev);
     overflow-x: auto;
   }
   #settings-tabs .tab {
     padding: 8px 14px;
     background: transparent;
-    color: #888;
+    color: var(--ttv-muted);
     border: none;
     border-bottom: 2px solid transparent;
     font: inherit;
     cursor: pointer;
     white-space: nowrap;
   }
-  #settings-tabs .tab:hover { color: #d4d4d4; }
+  #settings-tabs .tab:hover { color: var(--ttv-fg); }
   #settings-tabs .tab.active {
-    color: #6ed29a;
-    border-bottom-color: #6ed29a;
+    color: var(--ttv-accent);
+    border-bottom-color: var(--ttv-accent);
   }
   #settings-body {
     flex: 1;
     overflow-y: auto;
     padding: 16px;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
   }
-  #settings-body h3 { margin-top: 0; color: #d4d4d4; font-weight: 500; }
+  #settings-body h3 { margin-top: 0; color: var(--ttv-fg); font-weight: 500; }
   #settings-body .plugin-card {
     background: #252526;
     border: 1px solid #333;
@@ -184,8 +197,8 @@
     flex-direction: column;
     gap: 4px;
   }
-  #settings-body .plugin-card .name { font-weight: 600; color: #d4d4d4; }
-  #settings-body .plugin-card .meta { color: #888; font-size: 12px; }
+  #settings-body .plugin-card .name { font-weight: 600; color: var(--ttv-fg); }
+  #settings-body .plugin-card .meta { color: var(--ttv-muted); font-size: 12px; }
   #settings-body .plugin-card .desc { color: #b8b8b8; font-size: 13px; line-height: 1.4; margin-top: 4px; }
   #settings-body .plugin-card .row { display: flex; align-items: center; gap: 8px; }
   #settings-body .plugin-card .badge {
@@ -194,14 +207,14 @@
     border-radius: 10px;
     font-size: 11px;
     background: #2d2d2d;
-    color: #888;
+    color: var(--ttv-muted);
   }
-  #settings-body .plugin-card .badge.builtin { background: #1f3a2a; color: #6ed29a; }
+  #settings-body .plugin-card .badge.builtin { background: #1f3a2a; color: var(--ttv-accent); }
   #settings-body .plugin-card .badge.active   { background: #1f2a3a; color: #6e9ed2; }
-  #settings-body .empty { color: #888; padding: 16px 0; }
+  #settings-body .empty { color: var(--ttv-muted); padding: 16px 0; }
   #settings-body table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  #settings-body table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; text-align: left; }
-  #settings-body table th { color: #888; font-weight: 500; }
+  #settings-body table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid var(--ttv-border); text-align: left; }
+  #settings-body table th { color: var(--ttv-muted); font-weight: 500; }
 
   #pane-picker-overlay {
     position: fixed; inset: 0;
@@ -229,7 +242,7 @@
     pointer-events: auto;
   }
   #pane-picker-panel {
-    background: #1a1a1a;
+    background: var(--ttv-bg-elev2);
     border-top: 1px solid #444;
     border-radius: 12px 12px 0 0;
     max-height: 80vh;
@@ -241,28 +254,28 @@
   }
   #pane-picker-panel .pp-header {
     padding: 8px 16px 12px;
-    color: #888; font-size: 12px;
-    border-bottom: 1px solid #2a2a2a;
+    color: var(--ttv-muted); font-size: 12px;
+    border-bottom: 1px solid var(--ttv-border);
   }
   #pane-picker-panel .pp-item {
     display: flex; align-items: center;
     padding: 14px 16px;
     cursor: pointer;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
     border-bottom: 1px solid #222;
     font-size: 14px;
   }
   #pane-picker-panel .pp-item:hover, #pane-picker-panel .pp-item.active {
     background: #2a2a2a;
   }
-  #pane-picker-panel .pp-item.active { color: #6ed29a; }
+  #pane-picker-panel .pp-item.active { color: var(--ttv-accent); }
   #pane-picker-panel .pp-item .pp-session {
     flex: 1;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     font-weight: 500;
   }
   #pane-picker-panel .pp-item .pp-meta {
-    color: #888; font-size: 12px; margin-left: 8px;
+    color: var(--ttv-muted); font-size: 12px; margin-left: 8px;
   }
 
   /* Loading skeleton inside the grid host while a switch is in flight */
@@ -271,7 +284,7 @@
     position: absolute;
     top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    color: #888;
+    color: var(--ttv-muted);
     font-family: system-ui, sans-serif;
     font-size: 14px;
     pointer-events: none;
@@ -283,14 +296,14 @@
     margin-left: 4px;
     width: 10px; height: 10px;
     border-radius: 50%;
-    background: #888;
+    background: var(--ttv-muted);
     display: inline-block;
     flex: none;
     transition: background-color 200ms;
     overflow: hidden;
     text-indent: -9999px;       /* hide the literal text content */
   }
-  header .status.connected { background: #6ed29a; }
+  header .status.connected { background: var(--ttv-accent); }
   header .status.error { background: #f48771; }
   /* Hide brand title on narrow viewports — picker button gets the space. */
   @media (max-width: 600px) {
@@ -316,7 +329,7 @@
     display: flex;
     gap: 6px;
     padding: 6px 8px;
-    background: #0d0d0d;
+    background: var(--ttv-bg-elev);
     border-top: 1px solid #333;
   }
   #input-row textarea {
@@ -326,7 +339,7 @@
     max-height: 120px;
     padding: 6px 10px;
     background: #252526;
-    color: #d4d4d4;
+    color: var(--ttv-fg);
     border: 1px solid #444;
     border-radius: 6px;
     font-family: system-ui, sans-serif;
@@ -340,7 +353,7 @@
     flex: none;
     padding: 0 14px;
     background: #4ec9b0;
-    color: #0d0d0d;
+    color: var(--ttv-bg-elev);
     border: none;
     border-radius: 6px;
     font-weight: 600;
@@ -372,7 +385,7 @@
 
   #empty-msg {
     padding: 24px;
-    color: #888;
+    color: var(--ttv-muted);
     line-height: 1.5;
   }
   #empty-msg code {
@@ -382,7 +395,7 @@
     font-family: monospace;
     font-size: 0.9em;
   }
-  #empty-msg a { color: #6ed29a; }
+  #empty-msg a { color: var(--ttv-accent); }
 </style>
 </head>
 <body>
@@ -480,6 +493,27 @@ window.ttyview = (function() {
   };
   let activeTerminalViewId = null;
   let activeTerminalViewUnmount = null;  // returned by the plugin's render()
+  let activeThemeId = null;
+  // Names of CSS vars a theme is allowed to override. Anything outside this
+  // list is silently ignored — keeps a misbehaving theme from clobbering
+  // unrelated CSS or injecting arbitrary properties.
+  const THEME_VARS = new Set([
+    '--ttv-bg', '--ttv-fg', '--ttv-bg-elev', '--ttv-bg-elev2',
+    '--ttv-border', '--ttv-accent', '--ttv-muted',
+  ]);
+  function applyThemeVars(vars) {
+    const root = document.documentElement.style;
+    // Wipe previously-applied vars so switching themes doesn't carry
+    // stale overrides — :root defaults from the stylesheet take over
+    // whenever a theme doesn't set a particular var.
+    for (const v of THEME_VARS) root.removeProperty(v);
+    if (!vars) return;
+    for (const [k, val] of Object.entries(vars)) {
+      if (THEME_VARS.has(k) && typeof val === 'string') {
+        root.setProperty(k, val);
+      }
+    }
+  }
 
   function emit(event, data) {
     const set = eventListeners.get(event);
@@ -556,6 +590,18 @@ window.ttyview = (function() {
     _internal: {
       registries: registries,
       emit: emit,
+      getActiveThemeId: function() { return activeThemeId; },
+      setActiveThemeId: function(id) {
+        activeThemeId = id || null;
+        try {
+          if (id) localStorage.setItem('ttv-active-theme', id);
+          else localStorage.removeItem('ttv-active-theme');
+        } catch {}
+        if (!id) { applyThemeVars(null); emit('theme-activated', { id: null }); return; }
+        const def = registries.theme.get(id);
+        applyThemeVars(def && def.vars);
+        emit('theme-activated', { id });
+      },
       getActiveTerminalViewId: function() { return activeTerminalViewId; },
       // Mount the plugin's render(host, ctx). Unmounts the previous
       // active view first if any. Errors during mount are caught
@@ -569,6 +615,10 @@ window.ttyview = (function() {
         // Empty the host so the new plugin starts from a clean slate.
         if ($host) $host.innerHTML = '';
         activeTerminalViewId = id;
+        try {
+          if (id) localStorage.setItem('ttv-active-view', id);
+          else localStorage.removeItem('ttv-active-view');
+        } catch {}
         if (!id) return;
         const def = registries.terminalView.get(id);
         if (!def || typeof def.render !== 'function') {
@@ -584,9 +634,35 @@ window.ttyview = (function() {
           console.error('terminal-view render threw', e);
         }
         emit('terminal-view-activated', { id });
+        // After activation: if the user previously had a different view
+        // selected and the WS is already connected, the new plugin needs
+        // a fresh grid-loaded event to populate. Re-emit now via the
+        // platform's loadGrid path if a pane is selected.
+        if (typeof loadGrid === 'function' && activePaneId) {
+          try { loadGrid(activePaneId); } catch {}
+        }
       },
     },
   };
+})();
+
+// === Theme auto-apply on registration ===
+// If the user previously activated a theme, apply it as soon as its
+// plugin registers (theme plugins are typically eval'd by the boot
+// loader after the platform is up — handle the late-arrival case).
+(function() {
+  let savedId = null;
+  try { savedId = localStorage.getItem('ttv-active-theme'); } catch {}
+  if (!savedId) return;
+  // If already registered (e.g. bundled), apply immediately.
+  if (window.ttyview._internal.registries.theme.has(savedId)) {
+    window.ttyview._internal.setActiveThemeId(savedId);
+  }
+  window.ttyview.on('theme-registered', function(def) {
+    if (def && def.id === savedId) {
+      window.ttyview._internal.setActiveThemeId(savedId);
+    }
+  });
 })();
 
 // === Header-widget mounting ===
@@ -1184,8 +1260,11 @@ async function loadAllInstalledPlugins() {
         builtin.className = 'badge builtin';
         builtin.textContent = 'built-in';
         row.appendChild(builtin);
-        if (sec.title === 'Terminal views' &&
-            def.id === window.ttyview._internal.getActiveTerminalViewId()) {
+        const isActiveTerm = sec.title === 'Terminal views' &&
+            def.id === window.ttyview._internal.getActiveTerminalViewId();
+        const isActiveTheme = sec.title === 'Themes' &&
+            def.id === window.ttyview._internal.getActiveThemeId();
+        if (isActiveTerm || isActiveTheme) {
           const active = document.createElement('span');
           active.className = 'badge active';
           active.textContent = 'active';
@@ -1199,6 +1278,31 @@ async function loadAllInstalledPlugins() {
           const d = document.createElement('div'); d.className = 'desc';
           d.textContent = def.description;
           card.appendChild(d);
+        }
+        // Action buttons — themes get Activate/Deactivate, terminal views
+        // get Activate. Other contribution kinds are passive (cards are
+        // informational only).
+        if (sec.title === 'Themes' || sec.title === 'Terminal views') {
+          const actions = document.createElement('div');
+          actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;';
+          const btn = document.createElement('button');
+          btn.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+          if (sec.title === 'Themes') {
+            btn.textContent = isActiveTheme ? 'Deactivate' : 'Activate';
+            btn.addEventListener('click', function() {
+              window.ttyview._internal.setActiveThemeId(isActiveTheme ? null : def.id);
+              render();
+            });
+          } else {
+            btn.textContent = isActiveTerm ? 'Active' : 'Activate';
+            btn.disabled = isActiveTerm;
+            if (!isActiveTerm) btn.addEventListener('click', function() {
+              window.ttyview._internal.setActiveTerminalViewId(def.id);
+              render();
+            });
+          }
+          actions.appendChild(btn);
+          card.appendChild(actions);
         }
         el.appendChild(card);
       }
@@ -1567,7 +1671,29 @@ window.ttyview.contributes.terminalView({
     };
   },
 });
-window.ttyview._internal.setActiveTerminalViewId('cell-grid');
+// Restore saved active view (defaults to cell-grid). If the saved id
+// belongs to a plugin that hasn't loaded yet — community-installed
+// plugins eval AFTER this point — leave activation to the
+// terminalView-registered listener below.
+(function() {
+  let saved = null;
+  try { saved = localStorage.getItem('ttv-active-view'); } catch {}
+  const tv = window.ttyview;
+  if (saved && tv._internal.registries.terminalView.has(saved)) {
+    tv._internal.setActiveTerminalViewId(saved);
+  } else {
+    tv._internal.setActiveTerminalViewId('cell-grid');
+    if (saved) {
+      // Saved id refers to a plugin not yet loaded — switch when it does.
+      const off = tv.on('terminalView-registered', function(def) {
+        if (def && def.id === saved) {
+          tv._internal.setActiveTerminalViewId(saved);
+          off();
+        }
+      });
+    }
+  }
+})();
 
 // === Input handling ===
 const $input = document.getElementById('input-text');

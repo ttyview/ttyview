@@ -18,6 +18,15 @@
       "author": "ttyview",
       "kind": "headerWidget",
       "source": "ttyview-pane-counter.js"
+    },
+    {
+      "id": "ttyview-solarized-dark",
+      "name": "Solarized Dark",
+      "description": "Ethan Schoonover's classic Solarized Dark palette mapped onto ttyview's CSS variables. Demonstrates the theme contribution point.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "theme",
+      "source": "ttyview-solarized-dark.js"
     }
   ]
 }
