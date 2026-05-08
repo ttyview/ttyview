@@ -110,8 +110,21 @@
     display: flex; flex-direction: column;
     overflow: hidden;
   }
+  /* Mobile: pin the panel to the top of the visible viewport so the
+     header (with × close) is always reachable. `align-items: center`
+     on the overlay caused the panel to be vertically centered against
+     a 100vh container, but Android Chrome's 100vh is the URL-bar-
+     COLLAPSED height — so when the URL bar is showing, the centered
+     panel overflowed above the visible area and the close button was
+     unreachable. Switching to flex-start + dvh fixes it. */
   @media (max-width: 600px) {
-    #settings-panel { width: 100vw; height: 100vh; border-radius: 0; }
+    #settings-overlay { align-items: flex-start; }
+    #settings-panel {
+      width: 100vw;
+      height: 100vh;       /* fallback */
+      height: 100dvh;       /* dynamic viewport — adjusts to URL bar */
+      border-radius: 0;
+    }
   }
   #settings-header {
     flex: none;
