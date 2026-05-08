@@ -1,0 +1,16 @@
+[package]
+name = "ttyview-daemon"
+description = "Web terminal viewer daemon — attaches to tmux, exposes a structured cell-grid over HTTP/WS for the ttyview-client browser app. Mobile-first observability for Claude Code and other TUI agents."
+readme = "../../README.md"
+keywords = ["terminal", "tmux", "tui", "agent", "viewer"]
+categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "ttyview-daemon"
+path = "src/main.rs"

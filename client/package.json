@@ -1,0 +1,25 @@
+{
+  "name": "@ttyview/client",
+  "version": "0.0.0",
+  "description": "Web terminal viewer for tmux sessions. Mobile-first observability for Claude Code and other TUI agents. Browser frontend.",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "README.md"
+  ],
+  "keywords": [
+    "terminal",
+    "tmux",
+    "tui",
+    "agent",
+    "viewer",
+    "claude-code"
+  ],
+  "author": "Eyal Levin <eyalev@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/ttyview",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ttyview/ttyview-client"
+  }
+}

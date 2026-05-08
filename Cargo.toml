@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["crates/ttyview-core", "crates/ttyview-daemon"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ttyview/ttyview-daemon"
+homepage = "https://github.com/ttyview"
+authors = ["Eyal Levin <eyalev@gmail.com>"]
