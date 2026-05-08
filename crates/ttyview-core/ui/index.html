@@ -86,6 +86,110 @@
   }
   #pane-picker-btn .chev { color: #888; font-size: 0.8em; }
 
+  /* Settings overlay — full-page modal listing plugins, theme, etc. */
+  #settings-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 110;
+    display: flex;
+    align-items: center; justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 120ms ease-out;
+  }
+  #settings-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  #settings-panel {
+    width: min(640px, 100vw);
+    height: min(720px, 100vh);
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  @media (max-width: 600px) {
+    #settings-panel { width: 100vw; height: 100vh; border-radius: 0; }
+  }
+  #settings-header {
+    flex: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #2a2a2a;
+    background: #0d0d0d;
+  }
+  #settings-header .title { flex: 1; font-weight: 600; color: #d4d4d4; font-size: 16px; }
+  #settings-close {
+    background: transparent;
+    color: #d4d4d4;
+    border: none;
+    font-size: 22px;
+    cursor: pointer;
+    padding: 0 8px;
+    line-height: 1;
+  }
+  #settings-close:hover { color: #f48771; }
+  #settings-tabs {
+    flex: none;
+    display: flex; gap: 2px;
+    padding: 8px 8px 0;
+    border-bottom: 1px solid #2a2a2a;
+    background: #0d0d0d;
+    overflow-x: auto;
+  }
+  #settings-tabs .tab {
+    padding: 8px 14px;
+    background: transparent;
+    color: #888;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #settings-tabs .tab:hover { color: #d4d4d4; }
+  #settings-tabs .tab.active {
+    color: #6ed29a;
+    border-bottom-color: #6ed29a;
+  }
+  #settings-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    color: #d4d4d4;
+  }
+  #settings-body h3 { margin-top: 0; color: #d4d4d4; font-weight: 500; }
+  #settings-body .plugin-card {
+    background: #252526;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  #settings-body .plugin-card .name { font-weight: 600; color: #d4d4d4; }
+  #settings-body .plugin-card .meta { color: #888; font-size: 12px; }
+  #settings-body .plugin-card .desc { color: #b8b8b8; font-size: 13px; line-height: 1.4; margin-top: 4px; }
+  #settings-body .plugin-card .row { display: flex; align-items: center; gap: 8px; }
+  #settings-body .plugin-card .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    background: #2d2d2d;
+    color: #888;
+  }
+  #settings-body .plugin-card .badge.builtin { background: #1f3a2a; color: #6ed29a; }
+  #settings-body .plugin-card .badge.active   { background: #1f2a3a; color: #6e9ed2; }
+  #settings-body .empty { color: #888; padding: 16px 0; }
+  #settings-body table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #settings-body table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid #2a2a2a; text-align: left; }
+  #settings-body table th { color: #888; font-weight: 500; }
+
   #pane-picker-overlay {
     position: fixed; inset: 0;
     background: rgba(0, 0, 0, 0.55);
@@ -285,6 +389,7 @@
     <button id="font-up" title="Larger font">A+</button>
   </span>
   <button id="scroll-bottom" title="Scroll to live tail">↓</button>
+  <button id="settings-btn" title="Settings">⚙</button>
   <span class="status" id="status">disconnected</span>
 </header>
 
@@ -301,6 +406,17 @@
   </div>
   <div id="sb-host"></div>
   <div id="primary-host"></div>
+</div>
+
+<div id="settings-overlay" role="dialog" aria-label="Settings">
+  <div id="settings-panel">
+    <div id="settings-header">
+      <span class="title">Settings</span>
+      <button id="settings-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div id="settings-tabs"></div>
+    <div id="settings-body"></div>
+  </div>
 </div>
 
 <div id="input-row">
@@ -321,6 +437,116 @@ let activePaneId = null;
 let cells = new Map();   // "r,c" -> <span>
 let ws = null;
 let wsRetryMs = 1000;
+
+// =============================================================
+// Plugin API surface
+// =============================================================
+//
+// `window.ttyview` is the contract for plugins. It is small,
+// versioned, and append-only — adding new contribution points
+// or events is fine; removing/changing existing ones bumps
+// apiVersion and breaks plugins that target the old version.
+//
+// Phase 1 (today): in-page-only plugins. Cell-grid is the
+// reference plugin, registered by this same bundle. Settings
+// overlay reads the registries to show "what's installed."
+// Phase 2: settings-driven enable/disable. Phase 3: remote
+// install from a community registry.
+//
+// Plugins access the API via window.ttyview. They declare
+// what they contribute; the core knows the FULL set of
+// contribution points and renders them generically. Plugins
+// don't poke at the DOM directly — they declare contributions
+// and the core handles placement/lifecycle.
+window.ttyview = (function() {
+  const eventListeners = new Map(); // event-name -> Set<handler>
+  const registries = {
+    terminalView: new Map(),  // id -> def {id, name, description?, render(host, ctx)}
+    settingsTab: new Map(),   // id -> def {id, title, render(container)}
+    command: new Map(),       // id -> def {id, name, hotkey?, handler()}
+    theme: new Map(),         // id -> def {id, name, vars: {key:val}}
+  };
+  let activeTerminalViewId = null;
+
+  function emit(event, data) {
+    const set = eventListeners.get(event);
+    if (!set) return;
+    for (const h of [...set]) {
+      try { h(data); } catch (e) { console.error('plugin event handler:', e); }
+    }
+  }
+  function on(event, handler) {
+    if (!eventListeners.has(event)) eventListeners.set(event, new Set());
+    eventListeners.get(event).add(handler);
+    return () => eventListeners.get(event)?.delete(handler);
+  }
+  function makeContributor(kind) {
+    return function(def) {
+      if (!def || !def.id) throw new Error('plugin contribution requires { id }');
+      registries[kind].set(def.id, def);
+      emit(kind + '-registered', def);
+      return function unregister() {
+        registries[kind].delete(def.id);
+        emit(kind + '-unregistered', def);
+      };
+    };
+  }
+  function pluginStorage(pluginId) {
+    const prefix = 'ttv-plugin:' + pluginId + ':';
+    return {
+      get(key) {
+        try {
+          const raw = localStorage.getItem(prefix + key);
+          return raw == null ? null : JSON.parse(raw);
+        } catch { return null; }
+      },
+      set(key, value) {
+        try { localStorage.setItem(prefix + key, JSON.stringify(value)); } catch {}
+      },
+      remove(key) {
+        try { localStorage.removeItem(prefix + key); } catch {}
+      },
+    };
+  }
+  return {
+    apiVersion: 1,
+    // === Pane state + actions ===
+    listPanes: function() { return panesCache.slice(); },
+    getActivePane: function() {
+      return panesCache.find(function(p) { return p.id === activePaneId; }) || null;
+    },
+    selectPane: function(paneId) { return selectPane(paneId); },
+    sendInput: function(paneId, keys) {
+      // Forward via WS; the daemon routes to the right pane via t:'input'.
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const target = paneId || activePaneId;
+      if (!target) return;
+      const converted = keys.replace(/\n/g, '\r');
+      ws.send(JSON.stringify({ t: 'input', p: target, keys: converted }));
+    },
+    // === Events ===
+    // Emitted: 'pane-changed', 'panes-updated', 'grid-loaded',
+    //          'cell-diff', 'scrollback-append',
+    //          '{kind}-registered', '{kind}-unregistered'.
+    on: on,
+    // === Contribution points ===
+    contributes: {
+      terminalView: makeContributor('terminalView'),
+      settingsTab:  makeContributor('settingsTab'),
+      command:      makeContributor('command'),
+      theme:        makeContributor('theme'),
+    },
+    // === Per-plugin storage (localStorage scoped by plugin id) ===
+    storage: pluginStorage,
+    // === Internal — used by the settings UI to render registries ===
+    _internal: {
+      registries: registries,
+      emit: emit,
+      getActiveTerminalViewId: function() { return activeTerminalViewId; },
+      setActiveTerminalViewId: function(id) { activeTerminalViewId = id; },
+    },
+  };
+})();
 
 // === Diagnostic logging ===
 // Lightweight client telemetry for debugging. Buffered locally,
@@ -635,6 +861,7 @@ async function loadPanes() {
     const r = await fetch('/panes');
     const list = await r.json();
     panesCache = list || [];
+    try { window.ttyview._internal.emit('panes-updated', panesCache.slice()); } catch {}
     $select.innerHTML = '';
     if (!list || list.length === 0) {
       $empty.innerHTML = 'No tmux sessions found. Start one with <code>tmux new-session -s mywork</code> and refresh.';
@@ -720,6 +947,8 @@ async function selectPane(paneId) {
   const t0 = performance.now();
   const prevPaneId = activePaneId;
   activePaneId = paneId;
+  // Plugin event: pane-changed (synchronous, before async work)
+  try { window.ttyview._internal.emit('pane-changed', { from: prevPaneId, to: paneId }); } catch {}
   // Persist for next reload. Stored by pane id (e.g. "%6"), but we
   // also save the session name so we can pick the same session even
   // if tmux reassigns pane ids on a server restart.
@@ -842,6 +1071,192 @@ if (window.visualViewport) {
 }
 
 applyFont(currentFontPx);
+
+// =============================================================
+// Settings overlay
+// =============================================================
+//
+// Reads the plugin registries and renders them as a tabbed list.
+// Plugins can also register their own settings tab via
+// ttyview.contributes.settingsTab(...).
+
+(function() {
+  const $overlay = document.getElementById('settings-overlay');
+  const $tabs    = document.getElementById('settings-tabs');
+  const $body    = document.getElementById('settings-body');
+  const $btn     = document.getElementById('settings-btn');
+  const $close   = document.getElementById('settings-close');
+
+  let activeTabId = 'plugins';
+
+  function open() {
+    activeTabId = activeTabId || 'plugins';
+    render();
+    $overlay.classList.add('open');
+  }
+  function close() { $overlay.classList.remove('open'); }
+
+  $btn.addEventListener('click', open);
+  $close.addEventListener('click', close);
+  $overlay.addEventListener('click', function(e) {
+    if (e.target.id === 'settings-overlay') close();
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && $overlay.classList.contains('open')) close();
+  });
+
+  function tabs() {
+    // Built-in tabs first; then any plugin-contributed tabs.
+    const list = [
+      { id: 'plugins',  title: 'Plugins' },
+      { id: 'about',    title: 'About' },
+    ];
+    const reg = window.ttyview._internal.registries.settingsTab;
+    for (const def of reg.values()) {
+      list.splice(list.length - 1, 0, { id: def.id, title: def.title, plugin: def });
+    }
+    return list;
+  }
+
+  function render() {
+    $tabs.innerHTML = '';
+    for (const t of tabs()) {
+      const b = document.createElement('button');
+      b.className = 'tab' + (t.id === activeTabId ? ' active' : '');
+      b.textContent = t.title;
+      b.addEventListener('click', function() {
+        activeTabId = t.id;
+        render();
+      });
+      $tabs.appendChild(b);
+    }
+    const t = tabs().find(function(x) { return x.id === activeTabId; });
+    $body.innerHTML = '';
+    if (!t) return;
+    if (t.id === 'plugins') {
+      renderPluginsTab($body);
+    } else if (t.id === 'about') {
+      renderAboutTab($body);
+    } else if (t.plugin) {
+      try { t.plugin.render($body); } catch (e) {
+        $body.textContent = 'plugin settings render error: ' + e.message;
+      }
+    }
+  }
+
+  function renderPluginsTab(el) {
+    const reg = window.ttyview._internal.registries;
+    const sections = [
+      { title: 'Terminal views', map: reg.terminalView },
+      { title: 'Settings tabs',  map: reg.settingsTab },
+      { title: 'Commands',       map: reg.command },
+      { title: 'Themes',         map: reg.theme },
+    ];
+    for (const sec of sections) {
+      const h = document.createElement('h3');
+      h.textContent = sec.title + ' (' + sec.map.size + ')';
+      el.appendChild(h);
+      if (sec.map.size === 0) {
+        const p = document.createElement('div');
+        p.className = 'empty';
+        p.textContent = 'No ' + sec.title.toLowerCase() + ' registered.';
+        el.appendChild(p);
+        continue;
+      }
+      for (const def of sec.map.values()) {
+        const card = document.createElement('div');
+        card.className = 'plugin-card';
+        const row = document.createElement('div'); row.className = 'row';
+        const name = document.createElement('span'); name.className = 'name';
+        name.textContent = def.name || def.title || def.id;
+        row.appendChild(name);
+        const builtin = document.createElement('span');
+        builtin.className = 'badge builtin';
+        builtin.textContent = 'built-in';
+        row.appendChild(builtin);
+        if (sec.title === 'Terminal views' &&
+            def.id === window.ttyview._internal.getActiveTerminalViewId()) {
+          const active = document.createElement('span');
+          active.className = 'badge active';
+          active.textContent = 'active';
+          row.appendChild(active);
+        }
+        card.appendChild(row);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.textContent = 'id: ' + def.id;
+        card.appendChild(meta);
+        if (def.description) {
+          const d = document.createElement('div'); d.className = 'desc';
+          d.textContent = def.description;
+          card.appendChild(d);
+        }
+        el.appendChild(card);
+      }
+    }
+  }
+
+  function renderAboutTab(el) {
+    const w = window.ttyview;
+    const t = document.createElement('table');
+    const rows = [
+      ['ttyview API version', String(w.apiVersion)],
+      ['Connected pane',     activePaneId || '(none)'],
+      ['Panes available',    String(panesCache.length)],
+      ['Terminal views',     String(w._internal.registries.terminalView.size)],
+      ['Active terminal',    w._internal.getActiveTerminalViewId() || '(none)'],
+    ];
+    for (const [k, v] of rows) {
+      const tr = document.createElement('tr');
+      const th = document.createElement('th'); th.textContent = k;
+      const td = document.createElement('td'); td.textContent = v;
+      tr.appendChild(th); tr.appendChild(td); t.appendChild(tr);
+    }
+    el.appendChild(t);
+    const note = document.createElement('p');
+    note.style.marginTop = '16px';
+    note.style.color = '#888';
+    note.style.fontSize = '12px';
+    note.innerHTML =
+      'ttyview is a thin platform for terminal-pane viewing. ' +
+      'Everything user-facing is a plugin: terminal views, themes, ' +
+      'correlators, commands. ' +
+      '<a href="https://github.com/ttyview" style="color:#6ed29a">github.com/ttyview</a>';
+    el.appendChild(note);
+  }
+
+  // Re-render the open overlay when registries change.
+  ['terminalView-registered', 'terminalView-unregistered',
+   'settingsTab-registered',  'settingsTab-unregistered',
+   'command-registered',      'command-unregistered',
+   'theme-registered',        'theme-unregistered',
+  ].forEach(function(ev) {
+    window.ttyview.on(ev, function() {
+      if ($overlay.classList.contains('open')) render();
+    });
+  });
+})();
+
+// =============================================================
+// Cell-grid: registered as the default terminal-view plugin
+// =============================================================
+//
+// In Phase 1, the rendering implementation still lives inline in
+// this bundle; the plugin contribution is declarative. Phase 2
+// will move the implementation behind def.render(host, ctx) so
+// alternative terminal views can replace it.
+window.ttyview.contributes.terminalView({
+  id: 'cell-grid',
+  name: 'Cell Grid',
+  description: 'DOM cell-grid renderer with frozen scrollback. ' +
+    'Mobile-first paint optimizations. The default view shipped with ttyview.',
+  render: function(host, ctx) {
+    // The current implementation already mounts itself to the
+    // bundled #grid-host via inline code at startup. Future
+    // refactor will move that into this function.
+    return function unmount() {};
+  },
+});
+window.ttyview._internal.setActiveTerminalViewId('cell-grid');
 
 // === Input handling ===
 const $input = document.getElementById('input-text');
