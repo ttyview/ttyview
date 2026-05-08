@@ -8,11 +8,23 @@ use crate::source::{multi_session::MultiSession, PaneId, SourceEvent};
 use crate::state::{run_cell_diff_broadcaster, seed_pane, PaneStore};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
+use std::path::Path;
 use tokio::process::Command;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 pub async fn run(addr: SocketAddr, socket: Option<&str>, rows: u16, cols: u16) -> Result<()> {
+    run_with_tls(addr, socket, rows, cols, None, None).await
+}
+
+pub async fn run_with_tls(
+    addr: SocketAddr,
+    socket: Option<&str>,
+    rows: u16,
+    cols: u16,
+    tls_cert: Option<&Path>,
+    tls_key: Option<&Path>,
+) -> Result<()> {
     info!("panel daemon starting; tmux socket = {:?}; bind = {addr}", socket);
     let mut store = PaneStore::new(rows, cols);
     store.set_tmux_socket(socket.map(String::from));
@@ -61,12 +73,7 @@ pub async fn run(addr: SocketAddr, socket: Option<&str>, rows: u16, cols: u16) -
             std::collections::HashMap::new(),
         )),
     });
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
-    info!("listening on http://{addr}");
-
-    // 3. Wait for a shutdown signal.
+    // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {
         let mut sigterm = signal(SignalKind::terminate()).expect("sigterm handler");
         tokio::select! {
@@ -75,10 +82,32 @@ pub async fn run(addr: SocketAddr, socket: Option<&str>, rows: u16, cols: u16) -
         }
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("axum serve")?;
+    if let (Some(cert), Some(key)) = (tls_cert, tls_key) {
+        info!("listening on https://{addr} (cert={}, key={})", cert.display(), key.display());
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+            .await
+            .with_context(|| format!("loading TLS cert/key from {}/{}", cert.display(), key.display()))?;
+        let handle = axum_server::Handle::new();
+        let handle_for_shutdown = handle.clone();
+        tokio::spawn(async move {
+            shutdown.await;
+            handle_for_shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+        });
+        axum_server::bind_rustls(addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await
+            .context("axum-server (TLS)")?;
+    } else {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .with_context(|| format!("binding {addr}"))?;
+        info!("listening on http://{addr}");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .context("axum serve")?;
+    }
     Ok(())
 }
 

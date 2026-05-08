@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 /// ttyview-daemon — web terminal viewer for tmux sessions.
 ///
@@ -26,6 +27,16 @@ struct Cli {
     /// Default pane size (columns).
     #[arg(long, default_value_t = 80)]
     cols: u16,
+
+    /// Path to a PEM-encoded TLS certificate. If supplied with --tls-key,
+    /// the server speaks HTTPS instead of HTTP. Required for mobile browsers
+    /// over Tailscale (the *.ts.net domain is HSTS-preloaded).
+    #[arg(long)]
+    tls_cert: Option<PathBuf>,
+
+    /// Path to the PEM-encoded TLS key matching --tls-cert.
+    #[arg(long)]
+    tls_key: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -35,5 +46,16 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     let cli = Cli::parse();
-    ttyview_core::cli::daemon::run(cli.bind, cli.socket.as_deref(), cli.rows, cli.cols).await
+    if cli.tls_cert.is_some() != cli.tls_key.is_some() {
+        anyhow::bail!("--tls-cert and --tls-key must be supplied together");
+    }
+    ttyview_core::cli::daemon::run_with_tls(
+        cli.bind,
+        cli.socket.as_deref(),
+        cli.rows,
+        cli.cols,
+        cli.tls_cert.as_deref(),
+        cli.tls_key.as_deref(),
+    )
+    .await
 }

@@ -39,17 +39,63 @@
     overflow: auto;
     contain: layout style;
     font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace;
-    font-size: 12px;
+    font-size: var(--ttv-font-size, 12px);
     line-height: 1.25;
     padding: 4px 6px;
     -webkit-font-smoothing: antialiased;
     touch-action: pan-y;
   }
+
+  /* Input row at bottom — send keys back to tmux. */
+  #input-row {
+    flex: none;
+    display: flex;
+    gap: 6px;
+    padding: 6px 8px;
+    background: #0d0d0d;
+    border-top: 1px solid #333;
+  }
+  #input-row textarea {
+    flex: 1;
+    resize: none;
+    min-height: 36px;
+    max-height: 120px;
+    padding: 6px 10px;
+    background: #252526;
+    color: #d4d4d4;
+    border: 1px solid #444;
+    border-radius: 6px;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    outline: none;
+  }
+  #input-row textarea:focus { border-color: #4ec9b0; }
+  #input-row textarea::placeholder { color: #666; }
+  #send-btn {
+    flex: none;
+    padding: 0 14px;
+    background: #4ec9b0;
+    color: #0d0d0d;
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #send-btn:hover { background: #5fdac1; }
+  #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .ttv-row {
     display: block;
     white-space: pre;
     min-height: 1.25em;
     contain: layout style paint;
+  }
+  /* Frozen scrollback rows — once written, never mutated. Off-screen
+     rows skip layout/paint via content-visibility (browsers that don't
+     support it just render normally). */
+  .ttv-row.frozen {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 1.25em;
   }
   .ttv-cell {
     display: inline-block;
@@ -57,6 +103,8 @@
   }
   .ttv-cell-w0 { width: 0; }
   .ttv-cell-w2 { width: 2ch; }
+  #sb-host { display: block; }
+  #primary-host { display: block; }
 
   #empty-msg {
     padding: 24px;
@@ -86,10 +134,19 @@
   <div id="empty-msg">
     Loading panes…
   </div>
+  <div id="sb-host"></div>
+  <div id="primary-host"></div>
+</div>
+
+<div id="input-row">
+  <textarea id="input-text" placeholder="Type a message — Enter to send, Shift+Enter for newline" rows="1"></textarea>
+  <button id="send-btn" type="button">Send</button>
 </div>
 
 <script>
 const $host = document.getElementById('grid-host');
+const $sbHost = document.getElementById('sb-host');
+const $primaryHost = document.getElementById('primary-host');
 const $empty = document.getElementById('empty-msg');
 const $select = document.getElementById('pane-select');
 const $refresh = document.getElementById('refresh');
@@ -163,12 +220,37 @@ function cellClassFor(width) {
   return 'ttv-cell';
 }
 
+function buildFrozenRow(rowSpec) {
+  const row = document.createElement('div');
+  row.className = 'ttv-row frozen';
+  const rowCells = rowSpec.cells || [];
+  for (let c = 0; c < rowCells.length; c++) {
+    const cell = rowCells[c];
+    const width = cell.width != null ? cell.width : 1;
+    const span = document.createElement('span');
+    span.className = cellClassFor(width);
+    span.textContent = width === 0 ? '' : (cell.ch || ' ');
+    applyCellStyle(span, cell);
+    row.appendChild(span);
+  }
+  return row;
+}
+
 function buildGrid(screen) {
   $empty.style.display = 'none';
-  $host.innerHTML = '';
+  $sbHost.innerHTML = '';
+  $primaryHost.innerHTML = '';
   cells = new Map();
-  // Schema: { size: [rows, cols], primary: [ {cells: [...], wrapped} ], alt, ... }
-  // Use alt buffer if active (CC's TUI lives in alt-screen).
+  // Schema: { size, primary: [{cells, wrapped}], alt, scrollback, ... }
+  // Frozen scrollback rows are immutable once written. CC's primary-buffer
+  // render-leak can rewrite them upstream — by keeping them OUT of the
+  // cell map, our DOM ignores those writes (only primary cells are in
+  // the map and receive cell-diff updates).
+  const sb = screen.scrollback || [];
+  for (let r = 0; r < sb.length; r++) {
+    $sbHost.appendChild(buildFrozenRow(sb[r]));
+  }
+  // Primary (live) buffer — alt if active, primary otherwise.
   const lines = (screen.alt && screen.alt.length) ? screen.alt : (screen.primary || []);
   for (let r = 0; r < lines.length; r++) {
     const row = document.createElement('div');
@@ -184,8 +266,10 @@ function buildGrid(screen) {
       row.appendChild(span);
       cells.set(r + ',' + c, span);
     }
-    $host.appendChild(row);
+    $primaryHost.appendChild(row);
   }
+  // Scroll to bottom — show live tail by default.
+  $host.scrollTop = $host.scrollHeight;
 }
 
 function applyCellDiff(diff) {
@@ -198,6 +282,19 @@ function applyCellDiff(diff) {
     const desired = cellClassFor(e.width);
     if (node.className !== desired) node.className = desired;
   }
+}
+
+function appendScrollback(evt) {
+  if (!evt.rows || evt.rows.length === 0) return;
+  // Preserve the user's reading position. If they're at the live tail,
+  // stay glued. If they're scrolled up reading history, don't yank them.
+  const wasAtBottom = ($host.scrollHeight - $host.scrollTop - $host.clientHeight) < 30;
+  const frag = document.createDocumentFragment();
+  for (const row of evt.rows) {
+    frag.appendChild(buildFrozenRow(row));
+  }
+  $sbHost.appendChild(frag);
+  if (wasAtBottom) $host.scrollTop = $host.scrollHeight;
 }
 
 async function loadPanes() {
@@ -250,10 +347,13 @@ function connectWs() {
   ws.onmessage = function(ev) {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
-    if (msg.t === 'cell-diff' && msg.p === activePaneId) {
+    if (msg.p !== activePaneId) return;
+    if (msg.t === 'cell-diff') {
       applyCellDiff(msg);
-    } else if (msg.t === 'grid-reset' && msg.p === activePaneId) {
+    } else if (msg.t === 'grid-reset') {
       loadGrid(activePaneId);
+    } else if (msg.t === 'scrollback-append') {
+      appendScrollback(msg);
     }
   };
   ws.onclose = function() {
@@ -266,7 +366,11 @@ function connectWs() {
 
 async function selectPane(paneId) {
   if (paneId === activePaneId) return;
+  const prevPaneId = activePaneId;
   activePaneId = paneId;
+  if (ws && ws.readyState === WebSocket.OPEN && prevPaneId) {
+    ws.send(JSON.stringify({ kind: 'unsub', p: prevPaneId }));
+  }
   await loadGrid(paneId);
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ kind: 'sub', p: paneId }));
@@ -278,6 +382,41 @@ $refresh.addEventListener('click', async function() {
   await loadPanes();
   if (activePaneId) await loadGrid(activePaneId);
 });
+
+// === Input handling ===
+const $input = document.getElementById('input-text');
+const $sendBtn = document.getElementById('send-btn');
+
+function sendInput(keys) {
+  if (!ws || ws.readyState !== WebSocket.OPEN || !activePaneId) return;
+  // CC's TUI (and bash readline, vim, …) read CR as Enter, not LF.
+  // The textarea produces \n on Enter — convert to \r before forwarding.
+  const converted = keys.replace(/\n/g, '\r');
+  ws.send(JSON.stringify({ kind: 'input', p: activePaneId, keys: converted }));
+}
+
+function submitInput() {
+  const text = $input.value;
+  if (!text) return;
+  // Append \r so the message gets submitted (vs. just typed into the prompt).
+  sendInput(text + '\r');
+  $input.value = '';
+  autoResizeInput();
+}
+
+function autoResizeInput() {
+  $input.style.height = 'auto';
+  $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+}
+
+$sendBtn.addEventListener('click', submitInput);
+$input.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    submitInput();
+  }
+});
+$input.addEventListener('input', autoResizeInput);
 
 (async function() {
   const panes = await loadPanes();
