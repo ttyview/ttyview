@@ -361,7 +361,7 @@ function connectWs() {
     setStatus('connected', 'connected');
     wsRetryMs = 1000;
     if (activePaneId) {
-      ws.send(JSON.stringify({ kind: 'sub', p: activePaneId }));
+      ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
     }
   };
   ws.onmessage = function(ev) {
@@ -389,11 +389,11 @@ async function selectPane(paneId) {
   const prevPaneId = activePaneId;
   activePaneId = paneId;
   if (ws && ws.readyState === WebSocket.OPEN && prevPaneId) {
-    ws.send(JSON.stringify({ kind: 'unsub', p: prevPaneId }));
+    ws.send(JSON.stringify({ t: 'unsub', p: prevPaneId }));
   }
   await loadGrid(paneId);
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ kind: 'sub', p: paneId }));
+    ws.send(JSON.stringify({ t: 'sub', p: paneId }));
   }
 }
 
@@ -480,7 +480,7 @@ function sendInput(keys) {
   // CC's TUI (and bash readline, vim, …) read CR as Enter, not LF.
   // The textarea produces \n on Enter — convert to \r before forwarding.
   const converted = keys.replace(/\n/g, '\r');
-  ws.send(JSON.stringify({ kind: 'input', p: activePaneId, keys: converted }));
+  ws.send(JSON.stringify({ t: 'input', p: activePaneId, keys: converted }));
 }
 
 function submitInput() {
