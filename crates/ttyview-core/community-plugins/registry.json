@@ -27,6 +27,15 @@
       "author": "ttyview",
       "kind": "theme",
       "source": "ttyview-solarized-dark.js"
+    },
+    {
+      "id": "ttyview-quickkeys",
+      "name": "Quick Keys",
+      "description": "Adds a horizontal row of common key buttons (Esc / Tab / Ctrl-C / arrows) above the input — useful for driving Claude Code, vim, or any TUI from a phone where these keys aren't on the soft keyboard.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "inputAccessory",
+      "source": "ttyview-quickkeys.js"
     }
   ]
 }

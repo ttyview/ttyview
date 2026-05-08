@@ -323,6 +323,36 @@
     touch-action: pan-y;
   }
 
+  /* Input accessory row — horizontally-scrolling buttons above the
+     input. Plugins mount slots inline; only visible when at least one
+     plugin contributes (the [hidden] attribute toggles via JS). */
+  #input-accessory {
+    flex: none;
+    display: flex;
+    gap: 4px;
+    padding: 4px 8px;
+    background: var(--ttv-bg-elev);
+    border-top: 1px solid #333;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  #input-accessory[hidden] { display: none; }
+  #input-accessory::-webkit-scrollbar { display: none; }
+  #input-accessory .ia-slot { display: inline-flex; gap: 4px; }
+  #input-accessory button {
+    flex: none;
+    background: var(--ttv-bg-elev2);
+    color: var(--ttv-fg);
+    border: 1px solid var(--ttv-border);
+    border-radius: 4px;
+    font: inherit;
+    font-size: 12px;
+    padding: 5px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #input-accessory button:active { background: var(--ttv-border); }
+
   /* Input row at bottom — send keys back to tmux. */
   #input-row {
     flex: none;
@@ -443,6 +473,10 @@
   </div>
 </div>
 
+<!-- inputAccessory plugins mount horizontal-scroll button rows here.
+     Empty by default; appears once any plugin contributes. -->
+<div id="input-accessory" hidden></div>
+
 <div id="input-row">
   <textarea id="input-text" placeholder="Message" rows="1"></textarea>
   <button id="send-btn" type="button">Send</button>
@@ -490,6 +524,7 @@ window.ttyview = (function() {
     command: new Map(),       // id -> def {id, name, hotkey?, handler()}
     theme: new Map(),         // id -> def {id, name, vars: {key:val}}
     headerWidget: new Map(),  // id -> def {id, name, render(slot)}
+    inputAccessory: new Map(), // id -> def {id, name, render(slot)} — row above the chat input
   };
   let activeTerminalViewId = null;
   let activeTerminalViewUnmount = null;  // returned by the plugin's render()
@@ -583,6 +618,7 @@ window.ttyview = (function() {
       command:      makeContributor('command'),
       theme:        makeContributor('theme'),
       headerWidget: makeContributor('headerWidget'),
+      inputAccessory: makeContributor('inputAccessory'),
     },
     // === Per-plugin storage (localStorage scoped by plugin id) ===
     storage: pluginStorage,
@@ -712,6 +748,46 @@ window.ttyview = (function() {
   }
   window.ttyview.on('headerWidget-registered', mountWidget);
   window.ttyview.on('headerWidget-unregistered', unmountWidget);
+})();
+
+// === Input-accessory mounting ===
+// Same shape as the header-widget mounter, but for the row above the
+// input. The container is hidden until at least one accessory mounts.
+(function() {
+  const $ia = document.getElementById('input-accessory');
+  if (!$ia) return;
+  const mounted = new Map();
+
+  function refreshVisibility() { $ia.hidden = mounted.size === 0; }
+
+  function mount(def) {
+    if (mounted.has(def.id)) return;
+    const slot = document.createElement('span');
+    slot.className = 'ia-slot';
+    slot.dataset.pluginId = def.id;
+    $ia.appendChild(slot);
+    let unmount = null;
+    try {
+      unmount = (typeof def.render === 'function') ? def.render(slot) || null : null;
+    } catch (e) {
+      console.error('inputAccessory render threw for ' + def.id, e);
+    }
+    mounted.set(def.id, { slot, unmount });
+    refreshVisibility();
+  }
+  function unmount(def) {
+    const m = mounted.get(def.id);
+    if (!m) return;
+    if (typeof m.unmount === 'function') {
+      try { m.unmount(); } catch (e) { console.error('inputAccessory unmount threw for ' + def.id, e); }
+    }
+    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
+    mounted.delete(def.id);
+    refreshVisibility();
+  }
+  for (const def of window.ttyview._internal.registries.inputAccessory.values()) mount(def);
+  window.ttyview.on('inputAccessory-registered', mount);
+  window.ttyview.on('inputAccessory-unregistered', unmount);
 })();
 
 // === Diagnostic logging ===
