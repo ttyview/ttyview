@@ -304,7 +304,7 @@
 </div>
 
 <div id="input-row">
-  <textarea id="input-text" placeholder="Type a message — Enter to send, Shift+Enter for newline" rows="1"></textarea>
+  <textarea id="input-text" placeholder="Message" rows="1"></textarea>
   <button id="send-btn" type="button">Send</button>
 </div>
 
@@ -720,6 +720,14 @@ async function selectPane(paneId) {
   const t0 = performance.now();
   const prevPaneId = activePaneId;
   activePaneId = paneId;
+  // Persist for next reload. Stored by pane id (e.g. "%6"), but we
+  // also save the session name so we can pick the same session even
+  // if tmux reassigns pane ids on a server restart.
+  try {
+    const p = panesCache.find(x => x.id === paneId);
+    localStorage.setItem('ttv-last-pane-id', paneId);
+    if (p) localStorage.setItem('ttv-last-session', p.session);
+  } catch {}
   $sbHost.innerHTML = '';
   $primaryHost.innerHTML = '';
   cells = new Map();
@@ -870,15 +878,35 @@ $input.addEventListener('keydown', function(e) {
 });
 $input.addEventListener('input', autoResizeInput);
 
+function pickInitialPane(panes) {
+  // Restore the last-selected pane across reloads. Try id first
+  // (exact match — same tmux server, same session). Fall back to
+  // session name (handles tmux server restart where pane ids
+  // reassign). Final fallback: first pane.
+  let lastId, lastSession;
+  try {
+    lastId = localStorage.getItem('ttv-last-pane-id');
+    lastSession = localStorage.getItem('ttv-last-session');
+  } catch {}
+  if (lastId) {
+    const byId = panes.find(p => p.id === lastId);
+    if (byId) return byId;
+  }
+  if (lastSession) {
+    const bySession = panes.find(p => p.session === lastSession);
+    if (bySession) return bySession;
+  }
+  return panes[0];
+}
+
 (async function() {
   const panes = await loadPanes();
   if (panes && panes.length) {
-    $select.value = panes[0].id;
-    // First-paint loading state so the empty grid shows feedback
-    // immediately, before the /grid fetch returns.
+    const initial = pickInitialPane(panes);
+    $select.value = initial.id;
     $host.classList.add('loading');
-    setStatus('loading ' + panes[0].id + '…');
-    await selectPane(panes[0].id);
+    setStatus('loading ' + initial.id + '…');
+    await selectPane(initial.id);
     connectWs();
   }
 })();
