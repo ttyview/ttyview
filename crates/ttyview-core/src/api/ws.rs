@@ -455,6 +455,23 @@ async fn handle_client_msg(
                 .await?;
         }
         ClientMsg::Input { pane, keys } => {
+            // read-only mode: silently ack with ok=false. Visitors of
+            // the demo / spectator endpoint shouldn't be able to type
+            // into the host's tmux. Silent rather than disconnecting
+            // because some plugins (e.g. ttyview-quickkeys) fire input
+            // events on every button tap.
+            if app.read_only {
+                let reply = ServerReply::Ack {
+                    for_kind: "input".into(),
+                    ok: false,
+                    message: Some("read-only mode".into()),
+                };
+                sender
+                    .send(Message::Text(serde_json::to_string(&reply)?))
+                    .await?;
+                let _ = (pane, keys);
+                return Ok(());
+            }
             // Forward to tmux send-keys. Splits at 16KB to dodge the
             // documented send-keys size limit.
             let socket = app.tmux_socket.clone();

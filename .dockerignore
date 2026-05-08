@@ -1,0 +1,10 @@
+target
+node_modules
+tests
+.github
+docs
+client
+*.md
+!README.md
+.git
+.gitignore

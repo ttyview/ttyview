@@ -51,6 +51,15 @@ pub struct AppState {
     /// plugins repo, a private fork, a local development server. Empty
     /// = bundled-only (the v1 default).
     pub registry_url: Option<String>,
+    /// Read-only mode. Set by --read-only or --demo. WebSocket
+    /// {t:"input"} messages are dropped; POST /plugins/install and
+    /// DELETE /plugins/uninstall return 403. Reads keep working.
+    pub read_only: bool,
+    /// Demo mode. Set by --demo. Implies read_only. Skips tmux entirely;
+    /// the synthetic pane "%demo" is the only thing in /panes, and its
+    /// CC transcript is the bundled demo conversation. Used for hosting
+    /// a public "try it" link where visitors need zero setup.
+    pub demo_mode: bool,
 }
 
 pub fn router(state: AppState) -> Router {

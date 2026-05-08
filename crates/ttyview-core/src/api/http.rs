@@ -477,6 +477,35 @@ async fn get_cc_transcript(
 ) -> Result<Response, (StatusCode, String)> {
     let tail = q.tail.unwrap_or(300).min(5000);
 
+    // Demo mode: serve the bundled curated transcript regardless of
+    // pane id. This is what makes `--demo` link-shareable — visitors
+    // get a real-looking CC chat without any tmux on the host.
+    if app.demo_mode {
+        use rust_embed::RustEmbed;
+        #[derive(RustEmbed)]
+        #[folder = "community-plugins/"]
+        struct Bundle;
+        let asset = Bundle::get("demo-transcript.jsonl")
+            .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "demo transcript missing".into()))?;
+        let text = String::from_utf8_lossy(&asset.data);
+        let mut turns: Vec<serde_json::Value> = Vec::new();
+        for line in text.lines() {
+            if line.trim().is_empty() { continue; }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                turns.push(v);
+            }
+        }
+        if turns.len() > tail {
+            turns.drain(0..turns.len() - tail);
+        }
+        return Ok(Json(CcTranscriptResp {
+            project_dir: "(demo)".into(),
+            jsonl: "demo-transcript.jsonl".into(),
+            count: turns.len(),
+            turns,
+        })
+        .into_response());
+    }
     // 1. Pane current path via tmux. We can't use the cached PaneStore
     //    state because it doesn't track cwd — pane_current_path is a
     //    separate tmux property maintained by tmux itself.

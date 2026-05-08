@@ -293,10 +293,70 @@ async fn install_plugin(
     State(app): State<Arc<AppState>>,
     Json(req): Json<InstallReq>,
 ) -> impl IntoResponse {
+    if app.read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(InstallResp { ok: false, plugin: None, error: Some("read-only mode: install disabled".into()) }),
+        );
+    }
     match install_inner(app, &req.id).await {
         Ok(plugin) => (StatusCode::OK, Json(InstallResp { ok: true, plugin: Some(plugin), error: None })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(InstallResp { ok: false, plugin: None, error: Some(e) })),
     }
+}
+
+/// Auto-install a curated set of plugins for `--demo` mode so visitors
+/// land on a presentable page without any clicks. Best-effort: any
+/// failure logs + falls through (the page still works, just less rich).
+pub async fn demo_install_curated() -> Result<(), String> {
+    for id in ["ttyview-cc", "ttyview-terminal-green"] {
+        match install_from_bundle(id).await {
+            Ok(_) => tracing::info!(target: "ttyview::demo", "auto-installed: {id}"),
+            Err(e) => tracing::warn!(target: "ttyview::demo", "auto-install {id}: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Bundle-only install path — used by demo_install_curated() to avoid
+/// the AppState requirement of install_inner. Identical write behavior;
+/// no remote-source fallback (demo runs offline by construction).
+async fn install_from_bundle(id: &str) -> Result<InstalledPlugin, String> {
+    let registry_bytes = CommunityPlugins::get("registry.json")
+        .ok_or_else(|| "no bundled registry.json".to_string())?;
+    let registry: RegistryFile = serde_json::from_slice(&registry_bytes.data)
+        .map_err(|e| format!("parse bundled registry: {e}"))?;
+    let entry = registry
+        .plugins
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| format!("not in registry: {id}"))?;
+    let asset = CommunityPlugins::get(&entry.source)
+        .ok_or_else(|| format!("source {} not in bundle", entry.source))?;
+    let dir = plugins_dir();
+    fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("create_dir_all: {e}"))?;
+    let installed_filename = format!("{id}.js");
+    let path = dir.join(&installed_filename);
+    fs::write(&path, asset.data.as_ref())
+        .await
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    let mut idx = read_installed_index().await;
+    idx.schema = 1;
+    idx.plugins.retain(|p| p.id != entry.id);
+    let plugin = InstalledPlugin {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        description: entry.description.clone(),
+        version: entry.version.clone(),
+        kind: entry.kind.clone(),
+        source: installed_filename,
+        installed_at: now_ms(),
+    };
+    idx.plugins.push(plugin.clone());
+    write_installed_index(&idx).await?;
+    Ok(plugin)
 }
 
 async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, String> {
@@ -354,7 +414,17 @@ struct UninstallResp {
     error: Option<String>,
 }
 
-async fn uninstall_plugin(Path(id): Path<String>) -> impl IntoResponse {
+async fn uninstall_plugin(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if app.read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(UninstallResp { ok: false, error: Some("read-only mode: uninstall disabled".into()) }),
+        );
+    }
+    let _ = app;
     match uninstall_inner(&id).await {
         Ok(()) => (StatusCode::OK, Json(UninstallResp { ok: true, error: None })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(UninstallResp { ok: false, error: Some(e) })),

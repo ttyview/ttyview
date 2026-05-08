@@ -56,6 +56,25 @@ struct Cli {
     /// (resolved against the bundle) or an absolute http(s) URL.
     #[arg(long)]
     registry_url: Option<String>,
+
+    /// Demo mode. Skips tmux entirely; serves a single synthetic pane
+    /// whose CC transcript is the bundled demo conversation. Useful for
+    /// hosting a "try it" link where visitors don't need to install
+    /// anything. Implies `--read-only` (no input is forwarded anywhere
+    /// because there's no real terminal). Auto-installs the
+    /// ttyview-cc + ttyview-terminal-green plugins on first launch
+    /// so the page lands in a presentable state.
+    #[arg(long)]
+    demo: bool,
+
+    /// Read-only mode. WebSocket {t:"input"} messages are dropped;
+    /// POST /plugins/install and DELETE /plugins/uninstall return 403.
+    /// All read endpoints (panes, grid, scrollback, cc-transcript,
+    /// registry, installed) keep working normally. Use this to share
+    /// a live tmux session as a read-only spectator URL without giving
+    /// visitors keystroke control.
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -68,15 +87,18 @@ async fn main() -> anyhow::Result<()> {
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!("--tls-cert and --tls-key must be supplied together");
     }
-    ttyview_core::cli::daemon::run_with_options(
-        cli.bind,
-        cli.socket.as_deref(),
-        cli.rows,
-        cli.cols,
-        cli.tls_cert.as_deref(),
-        cli.tls_key.as_deref(),
-        cli.diag_log.as_deref(),
-        cli.registry_url.as_deref(),
-    )
+    ttyview_core::cli::daemon::run_with_options_v2(ttyview_core::cli::daemon::RunOptions {
+        addr: cli.bind,
+        socket: cli.socket.clone(),
+        rows: cli.rows,
+        cols: cli.cols,
+        tls_cert: cli.tls_cert.clone(),
+        tls_key: cli.tls_key.clone(),
+        diag_log: cli.diag_log.clone(),
+        registry_url: cli.registry_url.clone(),
+        // demo implies read-only — there's no real PTY for input to land in.
+        demo_mode: cli.demo,
+        read_only: cli.read_only || cli.demo,
+    })
     .await
 }
