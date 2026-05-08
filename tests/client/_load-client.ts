@@ -75,10 +75,13 @@ export async function loadClient(initialFetches: Record<string, any> = {}): Prom
       fetchOverrides.get(decoded) ??
       fetchOverrides.get(url);
     if (override) {
+      const body = override.body;
+      const isStringBody = typeof body === 'string';
       return {
         ok: override.status < 400,
         status: override.status,
-        json: async () => override.body,
+        json: async () => isStringBody ? JSON.parse(body) : body,
+        text: async () => isStringBody ? body : JSON.stringify(body),
       };
     }
     throw new Error('Unmocked fetch: ' + url + ' (raw=' + rawPath + ', decoded=' + decoded + ')');

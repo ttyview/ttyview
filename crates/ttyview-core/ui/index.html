@@ -390,6 +390,7 @@
   </span>
   <button id="scroll-bottom" title="Scroll to live tail">↓</button>
   <button id="settings-btn" title="Settings">⚙</button>
+  <span id="header-widgets"><!-- plugin-rendered widgets land here --></span>
   <span class="status" id="status">disconnected</span>
 </header>
 
@@ -462,6 +463,7 @@ window.ttyview = (function() {
     settingsTab: new Map(),   // id -> def {id, title, render(container)}
     command: new Map(),       // id -> def {id, name, hotkey?, handler()}
     theme: new Map(),         // id -> def {id, name, vars: {key:val}}
+    headerWidget: new Map(),  // id -> def {id, name, render(slot)}
   };
   let activeTerminalViewId = null;
   let activeTerminalViewUnmount = null;  // returned by the plugin's render()
@@ -533,6 +535,7 @@ window.ttyview = (function() {
       settingsTab:  makeContributor('settingsTab'),
       command:      makeContributor('command'),
       theme:        makeContributor('theme'),
+      headerWidget: makeContributor('headerWidget'),
     },
     // === Per-plugin storage (localStorage scoped by plugin id) ===
     storage: pluginStorage,
@@ -571,6 +574,55 @@ window.ttyview = (function() {
       },
     },
   };
+})();
+
+// === Header-widget mounting ===
+// Plugins contribute via window.ttyview.contributes.headerWidget(def).
+// We listen for register/unregister events and mount each widget into
+// its own slot inside #header-widgets. Errors during a single widget's
+// render() are caught so a buggy plugin can't blank the whole header.
+(function() {
+  const $hw = document.getElementById('header-widgets');
+  if (!$hw) return;
+  const mounted = new Map();  // pluginId -> { slot, unmount }
+
+  function mountWidget(def) {
+    if (mounted.has(def.id)) return;  // re-register is a no-op
+    const slot = document.createElement('span');
+    slot.className = 'hw-slot';
+    slot.dataset.pluginId = def.id;
+    slot.style.cssText = 'display:inline-flex;align-items:center;';
+    $hw.appendChild(slot);
+    let unmount = null;
+    try {
+      unmount = (typeof def.render === 'function')
+        ? def.render(slot) || null
+        : null;
+    } catch (e) {
+      console.error('headerWidget render threw for ' + def.id, e);
+    }
+    mounted.set(def.id, { slot, unmount });
+  }
+
+  function unmountWidget(def) {
+    const m = mounted.get(def.id);
+    if (!m) return;
+    if (typeof m.unmount === 'function') {
+      try { m.unmount(); }
+      catch (e) { console.error('headerWidget unmount threw for ' + def.id, e); }
+    }
+    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
+    mounted.delete(def.id);
+  }
+
+  // Mount any widgets already registered (in case a plugin loaded
+  // before this glue ran — defensive, the order is currently the
+  // other way around but a future ordering change shouldn't break it).
+  for (const def of window.ttyview._internal.registries.headerWidget.values()) {
+    mountWidget(def);
+  }
+  window.ttyview.on('headerWidget-registered', mountWidget);
+  window.ttyview.on('headerWidget-unregistered', unmountWidget);
 })();
 
 // === Diagnostic logging ===
@@ -924,6 +976,96 @@ if (window.visualViewport) {
 applyFont(currentFontPx);
 
 // =============================================================
+// Plugin install / uninstall / boot-loader
+// =============================================================
+//
+// Installed plugins live on the daemon's filesystem at
+// `~/.config/ttyview/plugins/`. The daemon serves the index at
+// /plugins/installed and source at /plugins/installed/:id/source.
+// We fetch + eval them at boot so they can register contributions
+// before the platform finishes bootstrapping.
+async function installPlugin(id) {
+  const res = await fetch('/plugins/install', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error('install ' + id + ' → HTTP ' + res.status + ' ' + txt);
+  }
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'install failed');
+  // Eval the installed source immediately so the user sees the
+  // plugin take effect without a reload.
+  await loadInstalledPlugin(data.plugin.id);
+  return data.plugin;
+}
+
+async function uninstallPlugin(id) {
+  const res = await fetch('/plugins/uninstall/' + encodeURIComponent(id), {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error('uninstall ' + id + ' → HTTP ' + res.status + ' ' + txt);
+  }
+  // Best-effort live-uninstall: walk every contribution registry and
+  // tear down any item whose ID matches the plugin's. Most plugins
+  // register a single contribution under their own id, so this works
+  // for the common case. (Multi-contribution plugins would need a
+  // proper plugin manifest with explicit contributed ids — v2.)
+  const reg = window.ttyview._internal.registries;
+  for (const map of [reg.terminalView, reg.headerWidget, reg.settingsTab, reg.command, reg.theme]) {
+    if (map.has(id)) {
+      const def = map.get(id);
+      map.delete(id);
+      // Re-derive the registry kind from the map identity so we emit
+      // the correctly named -unregistered event (header-widget mounter,
+      // settings tab tabs(), etc. listen for these).
+      const kind = (map === reg.terminalView) ? 'terminalView'
+        : (map === reg.headerWidget) ? 'headerWidget'
+        : (map === reg.settingsTab) ? 'settingsTab'
+        : (map === reg.command) ? 'command'
+        : 'theme';
+      window.ttyview._internal.emit(kind + '-unregistered', def);
+    }
+  }
+  return true;
+}
+
+async function loadInstalledPlugin(id) {
+  const res = await fetch('/plugins/installed/' + encodeURIComponent(id) + '/source');
+  if (!res.ok) throw new Error('load source ' + id + ' → HTTP ' + res.status);
+  const src = await res.text();
+  // eval inside an IIFE so module-scope vars don't leak. This is the
+  // same trust model as a <script src> tag — the daemon controls what
+  // /plugins/installed serves, and that comes from a directory the
+  // user explicitly installs into.
+  try {
+    new Function(src)();
+  } catch (e) {
+    console.error('plugin ' + id + ' eval threw:', e);
+    throw e;
+  }
+}
+
+async function loadAllInstalledPlugins() {
+  try {
+    const res = await fetch('/plugins/installed');
+    if (!res.ok) return;
+    const data = await res.json();
+    const plugins = data.plugins || [];
+    for (const p of plugins) {
+      try { await loadInstalledPlugin(p.id); }
+      catch (e) { console.error('failed to boot-load plugin ' + p.id, e); }
+    }
+  } catch (e) {
+    console.error('loadAllInstalledPlugins:', e);
+  }
+}
+
+// =============================================================
 // Settings overlay
 // =============================================================
 //
@@ -960,6 +1102,7 @@ applyFont(currentFontPx);
     // Built-in tabs first; then any plugin-contributed tabs.
     const list = [
       { id: 'plugins',  title: 'Plugins' },
+      { id: 'discover', title: 'Discover' },
       { id: 'about',    title: 'About' },
     ];
     const reg = window.ttyview._internal.registries.settingsTab;
@@ -986,6 +1129,8 @@ applyFont(currentFontPx);
     if (!t) return;
     if (t.id === 'plugins') {
       renderPluginsTab($body);
+    } else if (t.id === 'discover') {
+      renderDiscoverTab($body);
     } else if (t.id === 'about') {
       renderAboutTab($body);
     } else if (t.plugin) {
@@ -999,6 +1144,7 @@ applyFont(currentFontPx);
     const reg = window.ttyview._internal.registries;
     const sections = [
       { title: 'Terminal views', map: reg.terminalView },
+      { title: 'Header widgets', map: reg.headerWidget },
       { title: 'Settings tabs',  map: reg.settingsTab },
       { title: 'Commands',       map: reg.command },
       { title: 'Themes',         map: reg.theme },
@@ -1043,6 +1189,102 @@ applyFont(currentFontPx);
         }
         el.appendChild(card);
       }
+    }
+  }
+
+  // === Discover tab ===
+  // Lists plugins available from the daemon's bundled registry. v1
+  // registry is shipped *with* the daemon (offline-friendly, easy to
+  // audit). v2 will swap to a remote GitHub-hosted registry.
+  async function renderDiscoverTab(el) {
+    el.innerHTML = '<div class="empty">Loading…</div>';
+    try {
+      const [reg, installed] = await Promise.all([
+        fetch('/plugins/registry').then(r => r.json()),
+        fetch('/plugins/installed').then(r => r.json()),
+      ]);
+      const installedIds = new Set((installed.plugins || []).map(p => p.id));
+      el.innerHTML = '';
+      const intro = document.createElement('p');
+      intro.style.cssText = 'color:#888;font-size:12px;margin:0 0 12px;';
+      intro.textContent = 'Plugins available from the bundled registry. ' +
+        'Install adds them to ~/.config/ttyview/plugins/ and loads them ' +
+        'into this page immediately. They re-load on every reload.';
+      el.appendChild(intro);
+      const plugins = reg.plugins || [];
+      if (plugins.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = 'Registry is empty.';
+        el.appendChild(empty);
+        return;
+      }
+      for (const p of plugins) {
+        const card = document.createElement('div');
+        card.className = 'plugin-card';
+        const row = document.createElement('div'); row.className = 'row';
+        const name = document.createElement('span'); name.className = 'name';
+        name.textContent = p.name;
+        row.appendChild(name);
+        const kind = document.createElement('span');
+        kind.className = 'badge builtin';
+        kind.textContent = p.kind;
+        row.appendChild(kind);
+        if (installedIds.has(p.id)) {
+          const inst = document.createElement('span');
+          inst.className = 'badge active';
+          inst.textContent = 'installed';
+          row.appendChild(inst);
+        }
+        card.appendChild(row);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.textContent = 'id: ' + p.id + ' · v' + p.version + ' · ' + p.author;
+        card.appendChild(meta);
+        const desc = document.createElement('div'); desc.className = 'desc';
+        desc.textContent = p.description || '';
+        card.appendChild(desc);
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;';
+        const btn = document.createElement('button');
+        btn.style.cssText = 'background:#2a2a2a;color:#d4d4d4;border:1px solid #3a3a3a;padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+        if (installedIds.has(p.id)) {
+          btn.textContent = 'Uninstall';
+          btn.addEventListener('click', async function() {
+            btn.disabled = true;
+            btn.textContent = 'Uninstalling…';
+            try {
+              await uninstallPlugin(p.id);
+              renderDiscoverTab(el);  // refresh
+            } catch (e) {
+              btn.textContent = 'Uninstall failed';
+              console.error(e);
+            }
+          });
+        } else {
+          btn.textContent = 'Install';
+          btn.addEventListener('click', async function() {
+            btn.disabled = true;
+            btn.textContent = 'Installing…';
+            try {
+              await installPlugin(p.id);
+              renderDiscoverTab(el);  // refresh
+            } catch (e) {
+              btn.textContent = 'Install failed';
+              console.error(e);
+            }
+          });
+        }
+        actions.appendChild(btn);
+        card.appendChild(actions);
+        el.appendChild(card);
+      }
+    } catch (e) {
+      el.innerHTML = '';
+      const err = document.createElement('div');
+      err.className = 'empty';
+      err.textContent = 'Failed to load registry: ' + e.message;
+      el.appendChild(err);
     }
   }
 
@@ -1371,6 +1613,12 @@ function pickInitialPane(panes) {
 }
 
 (async function() {
+  // Load installed plugins BEFORE we fetch panes — gives plugins a
+  // chance to subscribe to events emitted during pane bootstrap (e.g.
+  // panes-updated, grid-loaded). A plugin that registers late still
+  // works for future events; this just maximizes "first-paint feels
+  // complete" by mounting widgets before any rendering happens.
+  await loadAllInstalledPlugins();
   const panes = await loadPanes();
   if (panes && panes.length) {
     const initial = pickInitialPane(panes);

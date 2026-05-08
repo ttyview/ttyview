@@ -16,6 +16,7 @@
 //!   {"t":"input","p":"<pane>","keys":"..."}        → forward keys to tmux send-keys
 
 pub mod http;
+pub mod plugins;
 pub mod ws;
 
 use crate::state::PaneStore;
@@ -50,6 +51,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(http::routes())
         .merge(ws::routes())
+        .merge(plugins::routes())
         .merge(static_routes())
         .with_state(Arc::new(state))
 }

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "ttyview-clock",
+      "name": "Clock",
+      "description": "Adds a live clock to the header. Tiny demo plugin showing how to register a header widget and clean up on unmount.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "headerWidget",
+      "source": "ttyview-clock.js"
+    },
+    {
+      "id": "ttyview-pane-counter",
+      "name": "Pane Counter",
+      "description": "Shows total pane count + how many are idle (>5 min). Demonstrates listening to platform events (panes-updated) from a plugin.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "headerWidget",
+      "source": "ttyview-pane-counter.js"
+    }
+  ]
+}
