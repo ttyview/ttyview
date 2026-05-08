@@ -34,6 +34,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/panes/:id/scrollback", get(get_scrollback))
         .route("/panes/:id/drift", get(get_drift))
         .route("/panes/:id/reseed", post(post_reseed))
+        .route("/panes/:id/cc-transcript", get(get_cc_transcript))
 }
 
 async fn list_panes(State(app): State<Arc<AppState>>) -> Json<Vec<PaneSummary>> {
@@ -429,6 +430,147 @@ pub struct ReseedReport {
 /// tmux-web's panel pin calls this on overlay open as a belt-and-
 /// braces measure (cheap — capture-pane is <50ms — and always
 /// produces a correct grid).
+// =============================================================
+// Claude Code transcript reader
+// =============================================================
+//
+// Resolves a pane's current working directory via tmux, derives the
+// matching CC project directory under ~/.claude/projects/, finds the
+// most-recently-modified .jsonl in that dir, and returns the last N
+// lines parsed as JSON. CC's transcript format is one event per line;
+// we forward all event types and let the plugin decide what to render.
+//
+// Wire shape:
+//   { project_dir: String, jsonl: String, count: usize, turns: [JSON] }
+//
+// Errors are translated to plain-text 4xx so the plugin can show a
+// useful message instead of a generic "fetch failed" — pane lookups,
+// tmux failures, and "no JSONL found" are all expected and not bugs.
+
+#[derive(Deserialize)]
+pub struct CcTranscriptQuery {
+    /// `?tail=N` returns at most the last N JSONL events (most recent
+    /// kept). Defaults to 300 — large enough for a typical CC session,
+    /// small enough that the response stays under ~2 MB.
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CcTranscriptResp {
+    /// The resolved CC project directory (under ~/.claude/projects/).
+    pub project_dir: String,
+    /// The JSONL file we tailed.
+    pub jsonl: String,
+    /// Number of events returned.
+    pub count: usize,
+    /// Raw JSONL events, oldest-first. Each entry is the parsed line
+    /// from CC's transcript file. Plugins should branch on `type` /
+    /// `message.role` to decide rendering.
+    pub turns: Vec<serde_json::Value>,
+}
+
+async fn get_cc_transcript(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<CcTranscriptQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    let tail = q.tail.unwrap_or(300).min(5000);
+
+    // 1. Pane current path via tmux. We can't use the cached PaneStore
+    //    state because it doesn't track cwd — pane_current_path is a
+    //    separate tmux property maintained by tmux itself.
+    let mut cmd = Command::new("tmux");
+    if let Some(s) = &app.tmux_socket {
+        cmd.arg("-L").arg(s);
+    }
+    let out = cmd
+        .args(["display", "-p", "-t", &id, "#{pane_current_path}"])
+        .output()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("tmux display: {e}")))?;
+    if !out.status.success() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("tmux: pane {id} not found ({})", String::from_utf8_lossy(&out.stderr).trim()),
+        ));
+    }
+    let cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if cwd.is_empty() {
+        return Err((StatusCode::NOT_FOUND, "pane has no current_path".into()));
+    }
+
+    // 2. Derive CC project dir. CC encodes the cwd by replacing each
+    //    path separator with '-' (so `/home/eyalev/foo` → `-home-eyalev-foo`).
+    //    No URL-encoding, no escaping of dashes — naive substitution.
+    let encoded = cwd.replace('/', "-");
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let project_dir = std::path::PathBuf::from(home).join(".claude/projects").join(&encoded);
+    if !tokio::fs::try_exists(&project_dir).await.unwrap_or(false) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no CC project dir for cwd {cwd} (looked for {})", project_dir.display()),
+        ));
+    }
+
+    // 3. Find most-recently-modified .jsonl in that dir. CC writes one
+    //    file per session; the latest mtime is the active session.
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    let mut rd = tokio::fs::read_dir(&project_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("read project dir: {e}")))?;
+    while let Some(entry) = rd
+        .next_entry()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("dir entry: {e}")))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let m = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mt = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if newest.as_ref().map(|(_, t)| mt > *t).unwrap_or(true) {
+            newest = Some((path, mt));
+        }
+    }
+    let jsonl_path = newest
+        .ok_or((StatusCode::NOT_FOUND, format!("no .jsonl in {}", project_dir.display())))?
+        .0;
+
+    // 4. Read whole file (CC sessions cap at a few MB; tail by lines
+    //    rather than bytes so we don't truncate mid-line).
+    let bytes = tokio::fs::read(&jsonl_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("read {}: {e}", jsonl_path.display())))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut turns: Vec<serde_json::Value> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            turns.push(v);
+        }
+    }
+    let total = turns.len();
+    if turns.len() > tail {
+        turns.drain(0..turns.len() - tail);
+    }
+    let _ = total; // (might log later)
+
+    let resp = CcTranscriptResp {
+        project_dir: project_dir.display().to_string(),
+        jsonl: jsonl_path.display().to_string(),
+        count: turns.len(),
+        turns,
+    };
+    Ok(Json(resp).into_response())
+}
+
 async fn post_reseed(
     State(app): State<Arc<AppState>>,
     Path(id): Path<String>,

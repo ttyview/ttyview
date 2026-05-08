@@ -45,6 +45,33 @@
       "author": "ttyview",
       "kind": "terminalView",
       "source": "ttyview-text.js"
+    },
+    {
+      "id": "ttyview-cc",
+      "name": "Claude Code",
+      "description": "Renders the active pane's Claude Code conversation directly from the JSONL transcript on disk — chat-bubble UI with user / assistant / tool-use turns. Polls every 2 seconds for new turns. Pair with the Terminal Green theme for a CRT-like look.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "terminalView",
+      "source": "ttyview-cc.js"
+    },
+    {
+      "id": "ttyview-terminal-green",
+      "name": "Terminal Green",
+      "description": "Classic green-phosphor-on-black terminal palette. Pairs especially well with the Claude Code view to make it look like a vintage CRT.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "theme",
+      "source": "ttyview-terminal-green.js"
+    },
+    {
+      "id": "ttyview-nord",
+      "name": "Nord",
+      "description": "Arctic, north-bluish color palette by Arctic Ice Studio. Calm, low-contrast — easy on the eyes for long mobile reading sessions.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "theme",
+      "source": "ttyview-nord.js"
     }
   ]
 }
