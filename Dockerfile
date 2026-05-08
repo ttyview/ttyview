@@ -15,7 +15,7 @@
 #     ttyview-daemon --bind 0.0.0.0:8080 --read-only
 
 # ---------------- builder ----------------
-FROM rust:1-slim AS builder
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
 # Cache deps separately from sources — touching a .rs file shouldn't
 # rebuild the entire dependency graph.
