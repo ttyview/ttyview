@@ -12,10 +12,10 @@
 
   header {
     flex: none;
-    padding: 8px 12px;
+    padding: 6px 8px;
     background: #0d0d0d;
     border-bottom: 1px solid #333;
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 4px;
     font-size: 13px;
   }
   header .title { font-weight: 600; color: #6ed29a; }
@@ -30,6 +30,40 @@
     cursor: pointer;
   }
   header select:hover, header button:hover { background: #3d3d3d; }
+  /* Compact "kebab" overflow menu collapses minor controls on narrow
+     viewports so the picker button gets enough horizontal room. */
+  header #more-menu {
+    position: relative;
+  }
+  header #more-menu-btn { padding: 4px 8px; }
+  header #more-menu-panel {
+    position: absolute; top: 100%; right: 0;
+    margin-top: 4px;
+    background: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 6px;
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 50;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  }
+  header #more-menu-panel.open { display: flex; }
+  header #more-menu-panel button {
+    width: 100%;
+    text-align: left;
+    padding: 6px 10px;
+  }
+  header #more-menu-panel .row {
+    display: flex; gap: 4px;
+    border-bottom: 1px solid #2a2a2a;
+    padding-bottom: 6px; margin-bottom: 2px;
+  }
+  header #more-menu-panel .row:last-child {
+    border-bottom: none; padding-bottom: 0; margin-bottom: 0;
+  }
+  header #more-menu-panel .row button { flex: 1; text-align: center; min-width: 32px; }
 
   /* Custom in-app pane picker (replaces native <select>) */
   #pane-picker-btn {
@@ -127,10 +161,25 @@
   }
   #grid-host { position: relative; }
   header .font-ctl { display: flex; gap: 2px; }
-  header .font-ctl button { padding: 4px 8px; min-width: 28px; }
-  header .status { margin-left: auto; color: #888; font-size: 11px; }
-  header .status.connected { color: #6ed29a; }
-  header .status.error { color: #f48771; }
+  header .font-ctl button { padding: 4px 6px; min-width: 26px; }
+  header .status {
+    margin-left: 4px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #888;
+    display: inline-block;
+    flex: none;
+    transition: background-color 200ms;
+    overflow: hidden;
+    text-indent: -9999px;       /* hide the literal text content */
+  }
+  header .status.connected { background: #6ed29a; }
+  header .status.error { background: #f48771; }
+  /* Hide brand title on narrow viewports — picker button gets the space. */
+  @media (max-width: 600px) {
+    header .title, header .sep { display: none; }
+    header { padding: 6px 6px; }
+  }
 
   #grid-host {
     flex: 1;
