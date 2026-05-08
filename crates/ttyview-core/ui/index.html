@@ -380,26 +380,43 @@ function setStatus(text, cls) {
   $status.className = 'status' + (cls ? ' ' + cls : '');
 }
 
+// Panel serializes colors as Rust enum variants with default external
+// tagging:
+//   default     → null (or omitted)
+//   palette N   → { "Indexed": N }     (0..255 — 16 ANSI + 6×6×6 cube + grayscale)
+//   true color  → { "Rgb": { "r": R, "g": G, "b": B } }
+// (Some serializations also produce string "Default" — handle defensively.)
+const TTV_PALETTE_16 = [
+  '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
+  '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff',
+];
+function indexedToCss(idx) {
+  if (idx < 16) return TTV_PALETTE_16[idx];
+  if (idx < 232) {
+    const i = idx - 16;
+    const r = Math.floor(i / 36) * 51;
+    const g = Math.floor((i % 36) / 6) * 51;
+    const b = (i % 6) * 51;
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+  }
+  const v = (idx - 232) * 10 + 8;
+  return 'rgb(' + v + ',' + v + ',' + v + ')';
+}
 function colorToCss(color) {
-  if (!color || color.kind === 'default') return null;
-  if (color.kind === 'palette') {
-    const palette16 = [
-      '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
-      '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff',
-    ];
-    if (color.idx < 16) return palette16[color.idx];
-    if (color.idx < 232) {
-      const i = color.idx - 16;
-      const r = Math.floor(i / 36) * 51;
-      const g = Math.floor((i % 36) / 6) * 51;
-      const b = (i % 6) * 51;
+  if (color == null) return null;
+  if (typeof color === 'string') {
+    // "Default" or "default"
+    return null;
+  }
+  if (typeof color === 'object') {
+    if (typeof color.Indexed === 'number') return indexedToCss(color.Indexed);
+    if (color.Rgb && typeof color.Rgb === 'object') {
+      const { r, g, b } = color.Rgb;
       return 'rgb(' + r + ',' + g + ',' + b + ')';
     }
-    const v = (color.idx - 232) * 10 + 8;
-    return 'rgb(' + v + ',' + v + ',' + v + ')';
-  }
-  if (color.kind === 'rgb') {
-    return 'rgb(' + color.r + ',' + color.g + ',' + color.b + ')';
+    // legacy/alt shapes — handle gracefully
+    if (typeof color.idx === 'number') return indexedToCss(color.idx);
+    if (typeof color.r === 'number') return 'rgb(' + color.r + ',' + color.g + ',' + color.b + ')';
   }
   return null;
 }
