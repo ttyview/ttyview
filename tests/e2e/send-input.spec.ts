@@ -17,7 +17,10 @@ test.afterAll(async () => { await env.cleanup(); });
 
 test('typing in the input box → keys arrive in the tmux pane', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#pane-select')).toBeVisible();
+  // #pane-select is intentionally display:none — the visible UI is
+  // the custom #pane-picker-btn. We only need the select to be
+  // attached + populated for the value check below.
+  await expect(page.locator('#pane-select')).toBeAttached();
 
   // The daemon attached to a single tmux session. The pane select
   // should default to its only pane.
