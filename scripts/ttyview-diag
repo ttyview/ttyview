@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# ttyview-diag — summarize the daemon's diag JSONL.
+#
+# When the daemon is run with --diag-log <path>, client telemetry
+# events are appended as one JSON object per line. This script
+# turns that file into a human-readable report. Pure bash + jq;
+# no Rust compile, no install.
+#
+# Usage:
+#   ttyview-diag                              # default path
+#   ttyview-diag /path/to/diag.jsonl          # custom path
+#   ttyview-diag --since 1h                   # last hour only
+#   ttyview-diag --top 20                     # top 20 categories
+set -euo pipefail
+
+DEFAULT_PATH="${TTYVIEW_DIAG_LOG:-$HOME/.config/ttyview/diag.jsonl}"
+PATH_ARG="$DEFAULT_PATH"
+SINCE_HOURS=""
+TOP_N=10
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since)
+      shift
+      arg="$1"
+      case "$arg" in
+        *h) SINCE_HOURS="${arg%h}" ;;
+        *m) SINCE_HOURS=$(awk "BEGIN{print ${arg%m}/60}") ;;
+        *d) SINCE_HOURS=$(awk "BEGIN{print ${arg%d}*24}") ;;
+        *)  SINCE_HOURS="$arg" ;;
+      esac
+      shift
+      ;;
+    --top)  shift; TOP_N="$1"; shift ;;
+    -h|--help)
+      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*)
+      echo "ttyview-diag: unknown flag $1" >&2; exit 2 ;;
+    *)
+      PATH_ARG="$1"; shift ;;
+  esac
+done
+
+if [[ ! -f "$PATH_ARG" ]]; then
+  echo "ttyview-diag: $PATH_ARG not found." >&2
+  echo "Tip: run the daemon with --diag-log <path>." >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ttyview-diag: jq is required (apt install jq / brew install jq)." >&2
+  exit 1
+fi
+
+# Build jq filter for time window. Events have ts in epoch ms.
+SINCE_FILTER='.'
+if [[ -n "$SINCE_HOURS" ]]; then
+  CUTOFF_MS=$(awk -v h="$SINCE_HOURS" 'BEGIN{printf "%d", systime()*1000 - h*3600*1000}')
+  SINCE_FILTER="select(.ts >= $CUTOFF_MS)"
+fi
+
+WC=$(wc -l < "$PATH_ARG")
+echo "ttyview-diag — $PATH_ARG"
+echo "  total events: $WC"
+if [[ -n "$SINCE_HOURS" ]]; then
+  echo "  filtered to last ${SINCE_HOURS}h"
+fi
+
+FILTERED_COUNT=$(jq -c "$SINCE_FILTER" "$PATH_ARG" 2>/dev/null | wc -l)
+echo "  in window:    $FILTERED_COUNT"
+echo
+
+# Time range
+echo "── Time range"
+jq -r --argjson cutoff_filter "$([[ -n "$SINCE_HOURS" ]] && echo true || echo false)" \
+  "$SINCE_FILTER | .ts" "$PATH_ARG" 2>/dev/null \
+  | awk 'NR==1{first=$1} {last=$1} END{
+      if(NR==0){print "  (no events)"; exit}
+      printf "  first: %s\n", strftime("%Y-%m-%d %H:%M:%S", first/1000)
+      printf "  last:  %s\n", strftime("%Y-%m-%d %H:%M:%S", last/1000)
+      span_min = (last - first) / 60000
+      printf "  span:  %.1f min\n", span_min
+    }'
+echo
+
+# Category counts
+echo "── Top $TOP_N event categories"
+jq -r "$SINCE_FILTER | .cat // \"(no-cat)\"" "$PATH_ARG" 2>/dev/null \
+  | sort | uniq -c | sort -rn | head -n "$TOP_N" \
+  | awk '{printf "  %6d  %s\n", $1, $2}'
+echo
+
+# Sessions seen
+echo "── Sessions/panes seen"
+jq -r "$SINCE_FILTER | .sess // .pane // .p // empty" "$PATH_ARG" 2>/dev/null \
+  | sort -u | head -20 | awk '{printf "  %s\n", $0}'
+echo
+
+# Slowest paint / pane-switch / diff-flush events
+echo "── Slowest events (by *_ms field)"
+jq -c "$SINCE_FILTER | select((.dur_ms // .total_ms // .paint_ms // .fetch_ms // 0) > 50)" "$PATH_ARG" 2>/dev/null \
+  | jq -s --argjson n "$TOP_N" 'sort_by(-(.dur_ms // .total_ms // .paint_ms // .fetch_ms // 0)) | .[:$n] | .[]' \
+  | jq -r '"  " + ((.dur_ms // .total_ms // .paint_ms // .fetch_ms | tostring) + "ms ") + .cat + " " + (.sess // .pane // .p // "")'
+echo
+
+# Errors
+ERR_COUNT=$(jq -c "$SINCE_FILTER | select(.cat == \"err\")" "$PATH_ARG" 2>/dev/null | wc -l)
+echo "── Errors: $ERR_COUNT"
+if [[ "$ERR_COUNT" -gt 0 ]]; then
+  jq -c "$SINCE_FILTER | select(.cat == \"err\")" "$PATH_ARG" \
+    | head -5 \
+    | jq -r '"  [\(.ts | tostring | .[0:13] | tonumber/1000 | strftime("%H:%M:%S"))] " + (.msg // "(no msg)")'
+fi

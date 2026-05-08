@@ -28,7 +28,9 @@ What works:
 - ✅ **Plugin platform**: contribution points for terminal views, themes, header widgets, input accessories, settings tabs, commands
 - ✅ **Discover tab**: install plugins from bundled or remote registry
 - ✅ **Persisted state**: active terminal view + active theme survive reload
-- ✅ **Bundled plugins**: Clock, Pane Counter, Solarized Dark theme, Quick Keys, Plain Text view
+- ✅ **Command palette** (Ctrl/Cmd-K): fuzzy-search registered commands; dynamic switchers for active theme + terminal view
+- ✅ **Bundled plugins**: Clock, Pane Counter, Quick Keys, Plain Text view, **Claude Code chat view** (renders the active pane's CC JSONL transcript), Solarized Dark / Terminal Green / Nord themes
+- ✅ **`scripts/ttyview-diag`** — bash+jq summary of `--diag-log` JSONL (event counts, time range, slowest events, errors)
 
 What's coming:
 
