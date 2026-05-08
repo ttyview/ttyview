@@ -56,12 +56,19 @@
     position: fixed; inset: 0;
     background: rgba(0, 0, 0, 0.55);
     z-index: 100;
-    display: none;
+    display: flex;                /* always laid out — no display:none toggle */
     flex-direction: column;
     justify-content: flex-end;
-    backdrop-filter: blur(2px);
+    opacity: 0;
+    pointer-events: none;          /* invisible AND non-interactive when closed */
+    /* No backdrop-filter — Gaussian blur on a 1000-cell grid pane is
+       a measurable mobile-Chrome stall (each frame the browser has
+       to re-blur the backdrop while cell-diffs repaint). */
   }
-  #pane-picker-overlay.open { display: flex; }
+  #pane-picker-overlay.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
   #pane-picker-panel {
     background: #1a1a1a;
     border-top: 1px solid #444;
@@ -392,6 +399,21 @@ function applyCellDiff(diff) {
   }
 }
 
+// rAF queue for cell-diff events. Multiple WS frames in the same
+// frame collapse into one DOM-mutation pass — keeps tap response
+// instant under heavy streaming load.
+let pendingDiffs = [];
+let diffRafId = 0;
+function flushDiffs() {
+  diffRafId = 0;
+  const batch = pendingDiffs;
+  pendingDiffs = [];
+  for (const d of batch) {
+    if (d.p !== activePaneId) continue;
+    applyCellDiff(d);
+  }
+}
+
 function appendScrollback(evt) {
   if (!evt.rows || evt.rows.length === 0) return;
   // Preserve the user's reading position. If they're at the live tail,
@@ -513,7 +535,14 @@ function connectWs() {
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     if (msg.p !== activePaneId) return;
     if (msg.t === 'cell-diff') {
-      applyCellDiff(msg);
+      // rAF-batched: queue the diff and apply on next animation frame.
+      // Without this, a flood of cell-diff events (CC streaming during
+      // a thinking response) ties up the main thread synchronously,
+      // delaying tap events by hundreds of ms. Batching coalesces
+      // multiple WS frames into one DOM-mutation pass per ~16ms,
+      // which keeps tap response immediate.
+      pendingDiffs.push(msg);
+      if (!diffRafId) diffRafId = requestAnimationFrame(flushDiffs);
     } else if (msg.t === 'grid-reset') {
       loadGrid(activePaneId);
     } else if (msg.t === 'scrollback-append') {
