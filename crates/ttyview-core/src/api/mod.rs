@@ -1,0 +1,102 @@
+//! HTTP + WebSocket API surface.
+//!
+//! Endpoints:
+//!   GET  /panes                     → list of pane summaries
+//!   GET  /panes/:id/grid            → full grid as JSON
+//!   GET  /panes/:id/text            → rendered text (trailing-trimmed)
+//!   GET  /panes/:id/text?ansi=1     → rendered text WITH ANSI color codes
+//!   GET  /ws                        → WebSocket: subscribe / snapshot / send-input
+//!   GET  /healthz                   → "ok"
+//!
+//! WebSocket messages (server → client) are LiveEvents from `state::LiveEvent`.
+//!
+//! WebSocket commands (client → server):
+//!   {"t":"sub","p":"<pane>","kinds":["out","tick","title"]}
+//!   {"t":"snapshot","p":"<pane>","req":"<id>"}    → server replies with a Snapshot frame
+//!   {"t":"input","p":"<pane>","keys":"..."}        → forward keys to tmux send-keys
+
+pub mod http;
+pub mod ws;
+
+use crate::state::PaneStore;
+use axum::Router;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub store: PaneStore,
+    /// tmux socket name (`-L`) for `send-keys` / `capture-pane` calls.
+    pub tmux_socket: Option<String>,
+    /// Refcount of WS connections that have switched a window to
+    /// `window-size manual` (via the `resize` client message). When the
+    /// count for a window drops to 0 — last interested WS disconnected or
+    /// explicitly released — the window-size option is restored to
+    /// `latest` so client-driven sizing resumes. Without this, every
+    /// "Fit pane to viewport" toggle leaves the window pinned forever,
+    /// which silently breaks any other tmux client (xterm.js in tmux-web,
+    /// a real terminal, etc.) that expects to drive its own size.
+    pub resized_windows: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .merge(http::routes())
+        .merge(ws::routes())
+        .merge(static_routes())
+        .with_state(Arc::new(state))
+}
+
+/// Static file serving for the embedded UI bundle (`ui/` dir, embedded at
+/// compile time via rust-embed). Mounted at `/ui/*` plus a top-level
+/// `/tuiv2` and `/` redirect for convenience.
+fn static_routes() -> Router<Arc<AppState>> {
+    use axum::{
+        http::{header, StatusCode, Uri},
+        response::{IntoResponse, Redirect, Response},
+        routing::get,
+    };
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "ui/"]
+    struct Assets;
+
+    async fn serve(uri: Uri) -> Response {
+        let path = uri.path().trim_start_matches('/').to_string();
+        let path = path.strip_prefix("ui/").unwrap_or(&path);
+        let path = if path.is_empty() || path == "ui" {
+            "index.html"
+        } else {
+            path
+        };
+        match Assets::get(path) {
+            Some(content) => {
+                let mime = mime_guess::from_path(path).first_or_octet_stream();
+                (
+                    [
+                        (header::CONTENT_TYPE, mime.as_ref()),
+                        // Dev-friendly: never let the browser hold onto an
+                        // old build. Embedded assets are tiny and re-fetching
+                        // them on each load is fine. Removes the "I changed
+                        // the CSS but the page looks the same" footgun.
+                        (header::CACHE_CONTROL, "no-store, must-revalidate"),
+                    ],
+                    content.data.into_owned(),
+                )
+                    .into_response()
+            }
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    async fn root_redirect() -> Redirect {
+        Redirect::temporary("/ui/index.html")
+    }
+
+    Router::new()
+        .route("/", get(root_redirect))
+        .route("/ui", get(serve))
+        .route("/ui/", get(serve))
+        .route("/ui/*path", get(serve))
+}

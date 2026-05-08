@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>ttyview</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #1e1e1e; color: #d4d4d4; font-family: system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+
+  header {
+    flex: none;
+    padding: 8px 12px;
+    background: #0d0d0d;
+    border-bottom: 1px solid #333;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px;
+  }
+  header .title { font-weight: 600; color: #6ed29a; }
+  header .sep { color: #666; }
+  header select, header button {
+    background: #2d2d2d;
+    color: #d4d4d4;
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  header select:hover, header button:hover { background: #3d3d3d; }
+  header .status { margin-left: auto; color: #888; font-size: 11px; }
+  header .status.connected { color: #6ed29a; }
+  header .status.error { color: #f48771; }
+
+  #grid-host {
+    flex: 1;
+    overflow: auto;
+    contain: layout style;
+    font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.25;
+    padding: 4px 6px;
+    -webkit-font-smoothing: antialiased;
+    touch-action: pan-y;
+  }
+  .ttv-row {
+    display: block;
+    white-space: pre;
+    min-height: 1.25em;
+    contain: layout style paint;
+  }
+  .ttv-cell {
+    display: inline-block;
+    width: 1ch;
+  }
+  .ttv-cell-w0 { width: 0; }
+  .ttv-cell-w2 { width: 2ch; }
+
+  #empty-msg {
+    padding: 24px;
+    color: #888;
+    line-height: 1.5;
+  }
+  #empty-msg code {
+    background: #2d2d2d;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 0.9em;
+  }
+  #empty-msg a { color: #6ed29a; }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">ttyview</span>
+  <span class="sep">·</span>
+  <select id="pane-select"></select>
+  <button id="refresh" title="Refresh pane list">↻</button>
+  <span class="status" id="status">disconnected</span>
+</header>
+
+<div id="grid-host">
+  <div id="empty-msg">
+    Loading panes…
+  </div>
+</div>
+
+<script>
+const $host = document.getElementById('grid-host');
+const $empty = document.getElementById('empty-msg');
+const $select = document.getElementById('pane-select');
+const $refresh = document.getElementById('refresh');
+const $status = document.getElementById('status');
+
+let activePaneId = null;
+let cells = new Map();   // "r,c" -> <span>
+let ws = null;
+let wsRetryMs = 1000;
+
+function setStatus(text, cls) {
+  $status.textContent = text;
+  $status.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+function colorToCss(color) {
+  if (!color || color.kind === 'default') return null;
+  if (color.kind === 'palette') {
+    const palette16 = [
+      '#000000', '#cd0000', '#00cd00', '#cdcd00', '#0000ee', '#cd00cd', '#00cdcd', '#e5e5e5',
+      '#7f7f7f', '#ff0000', '#00ff00', '#ffff00', '#5c5cff', '#ff00ff', '#00ffff', '#ffffff',
+    ];
+    if (color.idx < 16) return palette16[color.idx];
+    if (color.idx < 232) {
+      const i = color.idx - 16;
+      const r = Math.floor(i / 36) * 51;
+      const g = Math.floor((i % 36) / 6) * 51;
+      const b = (i % 6) * 51;
+      return 'rgb(' + r + ',' + g + ',' + b + ')';
+    }
+    const v = (color.idx - 232) * 10 + 8;
+    return 'rgb(' + v + ',' + v + ',' + v + ')';
+  }
+  if (color.kind === 'rgb') {
+    return 'rgb(' + color.r + ',' + color.g + ',' + color.b + ')';
+  }
+  return null;
+}
+
+function applyCellStyle(node, cell) {
+  const fg = colorToCss(cell.fg);
+  const bg = colorToCss(cell.bg);
+  const a = cell.attrs || {};
+  let css = '';
+  const hasStyle = fg || bg || a.bold || a.italic || a.underline || a.strike || a.dim || a.inverse;
+  if (hasStyle) {
+    if (a.inverse) {
+      css = 'color:' + (bg || '#1e1e1e') + ';background-color:' + (fg || '#d4d4d4') + ';';
+    } else {
+      if (fg) css += 'color:' + fg + ';';
+      if (bg) css += 'background-color:' + bg + ';';
+    }
+    if (a.bold) css += 'font-weight:bold;';
+    if (a.italic) css += 'font-style:italic;';
+    let td = '';
+    if (a.underline) td += 'underline ';
+    if (a.strike) td += 'line-through';
+    const tdv = td.trim();
+    if (tdv) css += 'text-decoration:' + tdv + ';';
+    if (a.dim) css += 'opacity:0.6;';
+  }
+  if (node._ttvCss !== css) {
+    node.style.cssText = css;
+    node._ttvCss = css;
+  }
+}
+
+function cellClassFor(width) {
+  if (width === 0) return 'ttv-cell ttv-cell-w0';
+  if (width === 2) return 'ttv-cell ttv-cell-w2';
+  return 'ttv-cell';
+}
+
+function buildGrid(screen) {
+  $empty.style.display = 'none';
+  $host.innerHTML = '';
+  cells = new Map();
+  // Schema: { size: [rows, cols], primary: [ {cells: [...], wrapped} ], alt, ... }
+  // Use alt buffer if active (CC's TUI lives in alt-screen).
+  const lines = (screen.alt && screen.alt.length) ? screen.alt : (screen.primary || []);
+  for (let r = 0; r < lines.length; r++) {
+    const row = document.createElement('div');
+    row.className = 'ttv-row';
+    const rowCells = lines[r].cells || [];
+    for (let c = 0; c < rowCells.length; c++) {
+      const cell = rowCells[c];
+      const width = cell.width != null ? cell.width : 1;
+      const span = document.createElement('span');
+      span.className = cellClassFor(width);
+      span.textContent = width === 0 ? '' : (cell.ch || ' ');
+      applyCellStyle(span, cell);
+      row.appendChild(span);
+      cells.set(r + ',' + c, span);
+    }
+    $host.appendChild(row);
+  }
+}
+
+function applyCellDiff(diff) {
+  for (const e of diff.cells) {
+    const node = cells.get(e.r + ',' + e.c);
+    if (!node) continue;
+    const ch = (e.width === 0) ? '' : (e.ch || ' ');
+    if (node.textContent !== ch) node.textContent = ch;
+    applyCellStyle(node, e);
+    const desired = cellClassFor(e.width);
+    if (node.className !== desired) node.className = desired;
+  }
+}
+
+async function loadPanes() {
+  try {
+    const r = await fetch('/panes');
+    const list = await r.json();
+    $select.innerHTML = '';
+    if (!list || list.length === 0) {
+      $empty.innerHTML = 'No tmux sessions found. Start one with <code>tmux new-session -s mywork</code> and refresh.';
+      $empty.style.display = 'block';
+      return [];
+    }
+    for (const p of list) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.session + ' (' + p.id + ', ' + p.cols + '×' + p.rows + ')';
+      $select.appendChild(opt);
+    }
+    return list;
+  } catch (e) {
+    setStatus('error: ' + e.message, 'error');
+    return [];
+  }
+}
+
+async function loadGrid(paneId) {
+  setStatus('loading…');
+  try {
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?skip_scrollback=1');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const screen = await r.json();
+    buildGrid(screen);
+    setStatus('loaded ' + paneId, 'connected');
+  } catch (e) {
+    setStatus('grid error: ' + e.message, 'error');
+  }
+}
+
+function connectWs() {
+  if (ws) { try { ws.close(); } catch (e) {} }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ws.onopen = function() {
+    setStatus('connected', 'connected');
+    wsRetryMs = 1000;
+    if (activePaneId) {
+      ws.send(JSON.stringify({ kind: 'sub', p: activePaneId }));
+    }
+  };
+  ws.onmessage = function(ev) {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.t === 'cell-diff' && msg.p === activePaneId) {
+      applyCellDiff(msg);
+    } else if (msg.t === 'grid-reset' && msg.p === activePaneId) {
+      loadGrid(activePaneId);
+    }
+  };
+  ws.onclose = function() {
+    setStatus('reconnecting in ' + (wsRetryMs/1000) + 's…');
+    setTimeout(connectWs, wsRetryMs);
+    wsRetryMs = Math.min(wsRetryMs * 2, 15000);
+  };
+  ws.onerror = function() { setStatus('ws error', 'error'); };
+}
+
+async function selectPane(paneId) {
+  if (paneId === activePaneId) return;
+  activePaneId = paneId;
+  await loadGrid(paneId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ kind: 'sub', p: paneId }));
+  }
+}
+
+$select.addEventListener('change', function() { selectPane($select.value); });
+$refresh.addEventListener('click', async function() {
+  await loadPanes();
+  if (activePaneId) await loadGrid(activePaneId);
+});
+
+(async function() {
+  const panes = await loadPanes();
+  if (panes && panes.length) {
+    $select.value = panes[0].id;
+    await selectPane(panes[0].id);
+    connectWs();
+  }
+})();
+</script>
+</body>
+</html>
