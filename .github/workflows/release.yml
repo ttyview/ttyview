@@ -1,0 +1,103 @@
+name: Release
+
+# Builds release binaries on tag push (vX.Y.Z) for Linux x86_64,
+# Linux aarch64, and macOS (universal). Uploads them to a GitHub
+# Release. The Linux aarch64 build cross-compiles via the github-
+# hosted runner (no Docker, no QEMU) using `cross`.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    # Manual trigger lets you cut a release without a git tag — handy
+    # for testing the workflow itself before relying on it.
+
+permissions:
+  contents: write   # required to create releases + upload assets
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross (for aarch64-linux)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --bin ttyview-daemon
+
+      - name: Build (cargo)
+        if: matrix.cross != true
+        run: cargo build --release --target ${{ matrix.target }} --bin ttyview-daemon
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_NAME=ttyview-daemon
+          STAGING="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "$STAGING"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$STAGING/"
+          cp README.md LICENSE "$STAGING/"
+          tar -czf "${STAGING}.tar.gz" "$STAGING"
+          ls -la "${STAGING}.tar.gz"
+          shasum -a 256 "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ttyview-daemon-${{ matrix.target }}
+          path: |
+            ttyview-daemon-*.tar.gz
+            ttyview-daemon-*.tar.gz.sha256
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Show artifacts
+        run: ls -la artifacts/
+      - name: Create release + upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

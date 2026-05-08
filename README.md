@@ -1,33 +1,43 @@
 # ttyview
 
-> Web terminal viewer for tmux sessions. Mobile-first observability for Claude Code and other TUI agents.
+> Mobile-first web terminal viewer for tmux sessions. A thin **plugin platform** built around live tmux pane rendering — designed primarily for driving Claude Code (and other TUI agents) from your phone.
 
-Run a daemon on your machine; it attaches read-only to your tmux sessions and exposes a structured cell-grid + live cell-diff stream over HTTP/WebSocket. Open the daemon's URL in any browser (phone, tablet, desktop) — see your live tmux session rendered.
+Run a daemon on your machine; it attaches read-only to your tmux sessions and exposes a structured cell-grid + live cell-diff stream over HTTP/WebSocket. Open the daemon's URL in any browser — see your live tmux session rendered.
 
 ```
 [Browser]  ←HTTPS/WSS→  [ttyview-daemon]  ←tmux -C→  [your tmux + Claude Code]
 ```
 
+## Why ttyview
+
+Most "tmux on the web" projects render xterm.js + a PTY pipe. ttyview ships a structured cell grid (positions + chars + colors + per-cell mtime) and a cell-diff event stream. That gives you stable DOM, frozen scrollback, replaceable renderers, and per-row timestamps — the things that matter when the TUI inside is Claude Code (which leaks ghost UI into tmux scrollback on every redraw).
+
+Every visible part of the UI is a **plugin** — including the cell renderer itself. You can install plugins from the bundled or remote registry, swap themes, add header widgets, add keyboard accessory rows.
+
 ## Status
 
-**v0.0.1 — working, but minimal.** The daemon attaches to your tmux sessions and serves a basic HTML/JS client that renders any pane live. The wpin7-style mobile UX features (frozen-past scrollback, JSONL correlation with timestamps, density modes, autofit) are not in this release — coming in v0.0.2+.
+**v0.0.x — working platform.** Daemon attaches to all tmux sessions, serves a structured-grid + WebSocket API, and ships a plugin-based browser client.
 
-What works in v0.0.1:
-- Daemon attaches to all tmux sessions on your local server
-- HTTP API: `/panes`, `/panes/:id/grid`, `/panes/:id/text`, `/panes/:id/scrollback`
-- WebSocket: live `cell-diff`, `grid-reset`, `scrollback-append` events
-- Bundled HTML/JS client: pane picker, live cell-grid rendering, WS subscription
-- Mobile viewport baseline (touch scrolling, dark theme)
+What works:
 
-What's not in v0.0.1 yet:
-- Frozen scrollback (cells are mutated in-place; CC's render-leak protection isn't here yet)
-- Claude Code JSONL correlation (no per-message timestamps, no tool-call expand)
-- Density modes (filtering by user/assistant/tool/chrome)
-- Mobile paint optimizations (paint containment, content-visibility)
-- Send-input back to tmux
-- TLS — bind to localhost and put behind Tailscale or a reverse proxy
+- ✅ Daemon attaches to all tmux sessions on your local server
+- ✅ HTTP API: `/panes`, `/panes/:id/grid`, `/panes/:id/text`, `/panes/:id/scrollback`
+- ✅ WebSocket: live `cell-diff`, `grid-reset`, `scrollback-append` events
+- ✅ Send keys back to tmux: `{t:"input", p:"<pane>", keys:"..."}`
+- ✅ TLS: `--tls-cert` / `--tls-key`
+- ✅ **Plugin platform**: contribution points for terminal views, themes, header widgets, input accessories, settings tabs, commands
+- ✅ **Discover tab**: install plugins from bundled or remote registry
+- ✅ **Persisted state**: active terminal view + active theme survive reload
+- ✅ **Bundled plugins**: Clock, Pane Counter, Solarized Dark theme, Quick Keys, Plain Text view
 
-## Try it (v0.0.1)
+What's coming:
+
+- Plugin sandbox (iframe + postMessage) — currently plugins eval into the page
+- Remote `ttyview/community-plugins` repo as the default registry
+- More built-in CC-on-phone features (push notifications, session reconnect, voice)
+- Plugin SDK package on npm
+
+## Quick start
 
 Requires: Rust toolchain, `tmux`, a tmux session running on the same machine.
 
@@ -39,18 +49,59 @@ cargo build --release
 # Open http://127.0.0.1:7681 in your browser.
 ```
 
-To access from your phone, expose the port via Tailscale (`tailscale serve`) or any HTTPS reverse proxy.
+For phone access, expose the port via Tailscale serve or any HTTPS reverse proxy. Or pass TLS cert/key directly:
 
-CLI options:
+```bash
+./target/release/ttyview-daemon \
+  --bind 0.0.0.0:7681 \
+  --tls-cert ~/.config/ttyview/tls.crt \
+  --tls-key  ~/.config/ttyview/tls.key
+```
+
+## CLI options
 
 ```
 ttyview-daemon [OPTIONS]
 
-  --bind <ADDR>        Address to bind. Default: 127.0.0.1:7681
-  --socket <NAME>      Tmux socket (-L). Default: server's default.
-  --rows <N>           Default pane rows. Default: 50
-  --cols <N>           Default pane cols. Default: 80
+  --bind <ADDR>          Address to bind.                       [default: 127.0.0.1:7681]
+  --socket <NAME>        tmux socket (-L). Default: server's default.
+  --rows <N>             Default pane rows.                     [default: 50]
+  --cols <N>             Default pane cols.                     [default: 80]
+  --tls-cert <PATH>      PEM cert; pair with --tls-key for HTTPS.
+  --tls-key  <PATH>      PEM key.
+  --diag-log <PATH>      JSONL file for client telemetry events. Default: dropped.
+  --registry-url <URL>   Remote plugin registry. Default: bundled-only.
 ```
+
+## Plugins
+
+Installed plugins live at `~/.config/ttyview/plugins/`. The Settings overlay (⚙ in the header) has a **Discover** tab listing what's available — tap **Install** and the plugin's source is downloaded, persisted, and `eval()`'d into the page right away. They reload automatically on every page load.
+
+A plugin is just a JS file that calls `window.ttyview.contributes.<kind>({...})`. The full contract:
+
+```js
+window.ttyview.contributes.headerWidget({
+  id: 'my-clock',
+  name: 'My Clock',
+  render: function(slot) {
+    const span = document.createElement('span');
+    slot.appendChild(span);
+    const id = setInterval(() => { span.textContent = new Date().toLocaleTimeString(); }, 1000);
+    return () => clearInterval(id);   // unmount fn
+  },
+});
+```
+
+Contribution kinds (v1):
+
+- `terminalView` — full-screen pane renderer (cell-grid is the default)
+- `theme` — overrides 7 CSS custom properties on `:root`
+- `headerWidget` — span in the top header
+- `inputAccessory` — button row above the chat input (good for mobile soft-keyboard hotkeys)
+- `settingsTab` — adds a tab to the Settings overlay
+- `command` — registers a name + handler (palette UI coming)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full plugin spec.
 
 ## Layout
 
@@ -58,25 +109,28 @@ ttyview-daemon [OPTIONS]
 ttyview/
 ├── Cargo.toml                          # workspace root
 ├── crates/
-│   ├── ttyview-core/                   # library: vte parser, Screen, broadcaster, HTTP/WS
+│   ├── ttyview-core/
 │   │   ├── src/
 │   │   │   ├── grid/                   # Cell, Line, Cursor, Screen
 │   │   │   ├── parser/                 # vte::Perform → Screen mutations
-│   │   │   ├── source/                 # tmux -C control mode connector
-│   │   │   ├── state/                  # pane registry + broadcast channels
-│   │   │   ├── api/                    # HTTP + WebSocket handlers
-│   │   │   ├── detectors/              # claude code / shell heuristics
+│   │   │   ├── source/                 # tmux -C control-mode source
+│   │   │   ├── state/                  # pane store + broadcasters
+│   │   │   ├── api/                    # HTTP, WebSocket, plugin endpoints
+│   │   │   ├── detectors/              # claude / shell heuristics
 │   │   │   └── cli/                    # daemon entry-point
-│   │   └── ui/index.html               # bundled browser client (single file)
-│   └── ttyview-daemon/                 # thin binary wrapping ttyview-core
-├── client/                             # @ttyview/client npm package (stub for now)
-├── docs/
-└── protocol/                           # wire protocol schemas (TBD)
+│   │   ├── ui/index.html               # bundled web client + plugin platform
+│   │   └── community-plugins/          # bundled plugins + registry.json
+│   └── ttyview-daemon/                 # thin CLI wrapping ttyview-core
+├── client/                             # @ttyview/client npm package (stub)
+├── tests/
+│   ├── client/                         # vitest (35 cases) for the bundled client
+│   └── e2e/                            # Playwright end-to-end (TBD harness)
+└── docs/
 ```
 
 ## Acknowledgements
 
-`crates/ttyview-core` is extracted from [eyalev/panel](https://github.com/eyalev/panel), an earlier private experiment by the same author. The wpin7-style browser client patterns derive from [eyalev/tmux-web](https://github.com/eyalev/tmux-web).
+`crates/ttyview-core` is extracted from [eyalev/panel](https://github.com/eyalev/panel), an earlier experiment. Mobile UX patterns derive from [eyalev/tmux-web](https://github.com/eyalev/tmux-web).
 
 ## License
 
