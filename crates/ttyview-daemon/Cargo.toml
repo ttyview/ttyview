@@ -16,7 +16,7 @@ name = "ttyview-daemon"
 path = "src/main.rs"
 
 [dependencies]
-ttyview-core = { path = "../ttyview-core", version = "0.0.0" }
+ttyview-core = { path = "../ttyview-core", version = "0.1.0" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
