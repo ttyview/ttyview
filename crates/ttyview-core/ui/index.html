@@ -30,6 +30,85 @@
     cursor: pointer;
   }
   header select:hover, header button:hover { background: #3d3d3d; }
+
+  /* Custom in-app pane picker (replaces native <select>) */
+  #pane-picker-btn {
+    flex: 1; min-width: 0;
+    text-align: left;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px;
+    background: #2d2d2d;
+    color: #d4d4d4;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font: inherit;
+    cursor: pointer;
+    overflow: hidden;
+  }
+  #pane-picker-btn:hover { background: #3d3d3d; }
+  #pane-picker-btn .label {
+    flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #pane-picker-btn .chev { color: #888; font-size: 0.8em; }
+
+  #pane-picker-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    justify-content: flex-end;
+    backdrop-filter: blur(2px);
+  }
+  #pane-picker-overlay.open { display: flex; }
+  #pane-picker-panel {
+    background: #1a1a1a;
+    border-top: 1px solid #444;
+    border-radius: 12px 12px 0 0;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: 8px 0;
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.5);
+  }
+  #pane-picker-panel .pp-header {
+    padding: 8px 16px 12px;
+    color: #888; font-size: 12px;
+    border-bottom: 1px solid #2a2a2a;
+  }
+  #pane-picker-panel .pp-item {
+    display: flex; align-items: center;
+    padding: 14px 16px;
+    cursor: pointer;
+    color: #d4d4d4;
+    border-bottom: 1px solid #222;
+    font-size: 14px;
+  }
+  #pane-picker-panel .pp-item:hover, #pane-picker-panel .pp-item.active {
+    background: #2a2a2a;
+  }
+  #pane-picker-panel .pp-item.active { color: #6ed29a; }
+  #pane-picker-panel .pp-item .pp-session {
+    flex: 1;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 500;
+  }
+  #pane-picker-panel .pp-item .pp-meta {
+    color: #888; font-size: 12px; margin-left: 8px;
+  }
+
+  /* Loading skeleton inside the grid host while a switch is in flight */
+  #grid-host.loading::after {
+    content: 'Loading pane…';
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: #888;
+    font-family: system-ui, sans-serif;
+    font-size: 14px;
+    pointer-events: none;
+  }
+  #grid-host { position: relative; }
   header .font-ctl { display: flex; gap: 2px; }
   header .font-ctl button { padding: 4px 8px; min-width: 28px; }
   header .status { margin-left: auto; color: #888; font-size: 11px; }
@@ -127,7 +206,12 @@
 <header>
   <span class="title">ttyview</span>
   <span class="sep">·</span>
-  <select id="pane-select"></select>
+  <button id="pane-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
+    <span class="label" id="pane-picker-label">—</span>
+    <span class="chev">▾</span>
+  </button>
+  <!-- Hidden native select kept for tests + a11y; mirrors the picker. -->
+  <select id="pane-select" style="display:none" aria-hidden="true"></select>
   <button id="refresh" title="Refresh pane list">↻</button>
   <span class="font-ctl">
     <button id="font-down" title="Smaller font">A−</button>
@@ -137,6 +221,13 @@
   <button id="scroll-bottom" title="Scroll to live tail">↓</button>
   <span class="status" id="status">disconnected</span>
 </header>
+
+<div id="pane-picker-overlay" role="dialog" aria-label="Choose a pane">
+  <div id="pane-picker-panel" role="listbox">
+    <div class="pp-header">Choose a pane</div>
+    <div id="pane-picker-list"></div>
+  </div>
+</div>
 
 <div id="grid-host">
   <div id="empty-msg">
@@ -314,22 +405,75 @@ function appendScrollback(evt) {
   if (wasAtBottom) $host.scrollTop = $host.scrollHeight;
 }
 
+let panesCache = [];
+
+function paneLabel(p) {
+  return p.session + ' (' + p.id + ', ' + p.cols + '×' + p.rows + ')';
+}
+
+function updatePaneLabel() {
+  const $lbl = document.getElementById('pane-picker-label');
+  const p = panesCache.find(x => x.id === activePaneId);
+  $lbl.textContent = p ? paneLabel(p) : (activePaneId || '—');
+}
+
+function renderPanePickerList() {
+  const $list = document.getElementById('pane-picker-list');
+  $list.innerHTML = '';
+  for (const p of panesCache) {
+    const item = document.createElement('div');
+    item.className = 'pp-item' + (p.id === activePaneId ? ' active' : '');
+    item.setAttribute('role', 'option');
+    item.setAttribute('data-pane-id', p.id);
+    const sess = document.createElement('span');
+    sess.className = 'pp-session';
+    sess.textContent = p.session;
+    const meta = document.createElement('span');
+    meta.className = 'pp-meta';
+    meta.textContent = p.id + ' · ' + p.cols + '×' + p.rows;
+    item.appendChild(sess);
+    item.appendChild(meta);
+    item.addEventListener('click', function() {
+      closePanePicker();
+      // Synchronously dispatch the selection — selectPane shows the
+      // loading state in the same frame.
+      selectPane(p.id);
+    });
+    $list.appendChild(item);
+  }
+}
+
+function openPanePicker() {
+  renderPanePickerList();
+  document.getElementById('pane-picker-overlay').classList.add('open');
+  document.getElementById('pane-picker-btn').setAttribute('aria-expanded', 'true');
+}
+function closePanePicker() {
+  document.getElementById('pane-picker-overlay').classList.remove('open');
+  document.getElementById('pane-picker-btn').setAttribute('aria-expanded', 'false');
+}
+
 async function loadPanes() {
   try {
     const r = await fetch('/panes');
     const list = await r.json();
+    panesCache = list || [];
     $select.innerHTML = '';
     if (!list || list.length === 0) {
       $empty.innerHTML = 'No tmux sessions found. Start one with <code>tmux new-session -s mywork</code> and refresh.';
       $empty.style.display = 'block';
+      updatePaneLabel();
       return [];
     }
+    // Mirror into hidden <select> so the contract test (and any
+    // assistive tech) sees the options.
     for (const p of list) {
       const opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = p.session + ' (' + p.id + ', ' + p.cols + '×' + p.rows + ')';
+      opt.textContent = paneLabel(p);
       $select.appendChild(opt);
     }
+    updatePaneLabel();
     return list;
   } catch (e) {
     setStatus('error: ' + e.message, 'error');
@@ -388,16 +532,43 @@ async function selectPane(paneId) {
   if (paneId === activePaneId) return;
   const prevPaneId = activePaneId;
   activePaneId = paneId;
+  // === Synchronous UI feedback in this animation frame ===
+  // Clear stale grid so the user sees the switch happened, even
+  // though /grid hasn't returned yet. Show a spinner overlay via
+  // CSS class. This is the difference between a 1s "did anything
+  // happen?" and an instant "loading the next pane" feel.
+  $sbHost.innerHTML = '';
+  $primaryHost.innerHTML = '';
+  cells = new Map();
+  $host.classList.add('loading');
+  updatePaneLabel();
+  setStatus('loading ' + paneId + '…');
+  // Unsubscribe synchronously (lets server stop sending us cell-diffs
+  // for the old pane immediately, even before grid arrives for new).
   if (ws && ws.readyState === WebSocket.OPEN && prevPaneId) {
     ws.send(JSON.stringify({ t: 'unsub', p: prevPaneId }));
   }
+  // === Async work ===
   await loadGrid(paneId);
+  $host.classList.remove('loading');
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ t: 'sub', p: paneId }));
   }
 }
 
+// Hidden select still works for screen-readers + tests
 $select.addEventListener('change', function() { selectPane($select.value); });
+// Custom picker
+document.getElementById('pane-picker-btn').addEventListener('click', function() {
+  openPanePicker();
+});
+document.getElementById('pane-picker-overlay').addEventListener('click', function(e) {
+  // Tap outside the panel closes
+  if (e.target.id === 'pane-picker-overlay') closePanePicker();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closePanePicker();
+});
 $refresh.addEventListener('click', async function() {
   await loadPanes();
   if (activePaneId) await loadGrid(activePaneId);
@@ -510,6 +681,10 @@ $input.addEventListener('input', autoResizeInput);
   const panes = await loadPanes();
   if (panes && panes.length) {
     $select.value = panes[0].id;
+    // First-paint loading state so the empty grid shows feedback
+    // immediately, before the /grid fetch returns.
+    $host.classList.add('loading');
+    setStatus('loading ' + panes[0].id + '…');
     await selectPane(panes[0].id);
     connectWs();
   }
