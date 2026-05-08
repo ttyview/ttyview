@@ -1,0 +1,65 @@
+{
+  "_doc": "Wire protocol contract — messages exchanged between ttyview-client and ttyview-daemon. Both client unit tests AND server unit tests reference this file. If the schema drifts (e.g., 'kind' vs 't'), one side's tests will fail before shipping. Add new message types here first, then implement.",
+  "client_to_server": {
+    "subscribe": {
+      "_desc": "Subscribe to live events for a pane. Sent on first connect and after pane switch.",
+      "_example": { "t": "sub", "p": "%6" },
+      "required_fields": ["t", "p"],
+      "t_value": "sub"
+    },
+    "unsubscribe": {
+      "_desc": "Stop receiving events for a pane. Sent before switching to a different pane.",
+      "_example": { "t": "unsub", "p": "%6" },
+      "required_fields": ["t", "p"],
+      "t_value": "unsub"
+    },
+    "input": {
+      "_desc": "Send keys to a pane via tmux send-keys -l. Submit by appending \\r.",
+      "_example": { "t": "input", "p": "%6", "keys": "hi\r" },
+      "required_fields": ["t", "p", "keys"],
+      "t_value": "input"
+    }
+  },
+  "server_to_client": {
+    "cell_diff": {
+      "_desc": "Per-cell mutations since last tick. Coalesced server-side at 50ms.",
+      "_example": {
+        "t": "cell-diff",
+        "p": "%6",
+        "ts": 1778258959000,
+        "cells": [
+          { "r": 0, "c": 0, "ch": "h" },
+          { "r": 0, "c": 1, "ch": "i" }
+        ]
+      },
+      "required_fields": ["t", "p", "ts", "cells"],
+      "t_value": "cell-diff"
+    },
+    "grid_reset": {
+      "_desc": "Pane's alt-screen flipped (CC entering/leaving TUI). Client should re-fetch /grid.",
+      "_example": { "t": "grid-reset", "p": "%6", "alt": true },
+      "required_fields": ["t", "p", "alt"],
+      "t_value": "grid-reset"
+    },
+    "scrollback_append": {
+      "_desc": "Rows evicted from primary into scrollback. Client appends to frozen sb container.",
+      "_example": {
+        "t": "scrollback-append",
+        "p": "%6",
+        "from_count": 100,
+        "to_count": 102,
+        "rows": [
+          { "cells": [{ "ch": "o" }, { "ch": "k" }], "wrapped": false }
+        ]
+      },
+      "required_fields": ["t", "p", "from_count", "to_count", "rows"],
+      "t_value": "scrollback-append"
+    },
+    "ack": {
+      "_desc": "Acknowledgement of a client command (sub/unsub/input).",
+      "_example": { "t": "ack", "for_kind": "input", "ok": true, "message": null },
+      "required_fields": ["t", "for_kind", "ok"],
+      "t_value": "ack"
+    }
+  }
+}
