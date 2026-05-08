@@ -36,6 +36,15 @@
       "author": "ttyview",
       "kind": "inputAccessory",
       "source": "ttyview-quickkeys.js"
+    },
+    {
+      "id": "ttyview-text",
+      "name": "Plain Text",
+      "description": "Alternative terminal view that renders the pane as plain text rows (no per-cell DOM, no colors). Activate from Settings → Plugins → Terminal views to see how the platform supports radically different render strategies. Lighter than cell-grid; loses fg/bg color but keeps live updates.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "terminalView",
+      "source": "ttyview-text.js"
     }
   ]
 }
