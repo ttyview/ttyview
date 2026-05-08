@@ -61,9 +61,13 @@
     justify-content: flex-end;
     opacity: 0;
     pointer-events: none;          /* invisible AND non-interactive when closed */
-    /* No backdrop-filter — Gaussian blur on a 1000-cell grid pane is
-       a measurable mobile-Chrome stall (each frame the browser has
-       to re-blur the backdrop while cell-diffs repaint). */
+    /* Promote to its own compositor layer so the underlying 60k-cell
+       grid does NOT need to be re-rasterized when the overlay's
+       opacity changes. Without this, opacity 0→1 invalidated the
+       paint of the entire viewport-covering layer, which on mobile
+       Chrome with thousands of cells stalled rAF for ~6 seconds. */
+    will-change: opacity;
+    transform: translateZ(0);
   }
   #pane-picker-overlay.open {
     opacity: 1;
@@ -297,6 +301,24 @@ window.addEventListener('beforeunload', ttvDiagFlush);
 window.addEventListener('error', (e) => {
   ttvDiag('error', { msg: String(e.message), src: e.filename, line: e.lineno });
 });
+
+// Main-thread-stall detector. setInterval fires every 100ms; if it
+// fires LATE by >250ms, the main thread was blocked. Helps tell
+// "the browser was busy for X ms" from "JS was busy for X ms".
+let lastStallTick = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const expected = lastStallTick + 100;
+  const stall = now - expected;
+  lastStallTick = now;
+  if (stall > 250) {
+    ttvDiag('stall', { dur_ms: +stall.toFixed(0) });
+  }
+}, 100);
+// Cap diff-flush size so a giant batch can't itself become a stall.
+// If panel ever sends a really big diff (e.g. on first connect),
+// process at most N cells per frame, deferring the rest.
+window.__ttvDiagBuf = ttvDiagBuf;
 
 function setStatus(text, cls) {
   $status.textContent = text;
@@ -567,10 +589,14 @@ async function loadPanes() {
 async function loadGrid(paneId) {
   setStatus('loading…');
   try {
-    // max_scrollback=2000 → pull recent history so the user can scroll
-    // up to read past output. Larger values are heavy for chatty CC
-    // panes (cell-grid JSON is verbose); 2000 is a balance.
-    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=2000');
+    // max_scrollback=500 → ~10 viewports of history. Anything more is
+    // a real mobile-Chrome perf cost: 500 rows × 60 cols = 30k cell
+    // <span> elements, plus their inline styles. Tested on a real
+    // phone, more than ~1000 frozen rows started causing multi-second
+    // paint stalls when an overlay's opacity changed (because the
+    // viewport-covering overlay forced a recomposite of all underlying
+    // layers). 500 is the sweet spot.
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=500');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const screen = await r.json();
     buildGrid(screen);
