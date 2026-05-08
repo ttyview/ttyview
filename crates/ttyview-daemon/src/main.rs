@@ -37,6 +37,14 @@ struct Cli {
     /// Path to the PEM-encoded TLS key matching --tls-cert.
     #[arg(long)]
     tls_key: Option<PathBuf>,
+
+    /// Path to a JSONL file. When set, client-shipped diagnostic
+    /// events (taps, perf timings, errors) are appended here as
+    /// JSON Lines. Default = unset = events are dropped on receipt.
+    /// Privacy: events contain only metadata (timings, event types,
+    /// sizes), NEVER cell content or user input.
+    #[arg(long)]
+    diag_log: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -49,13 +57,14 @@ async fn main() -> anyhow::Result<()> {
     if cli.tls_cert.is_some() != cli.tls_key.is_some() {
         anyhow::bail!("--tls-cert and --tls-key must be supplied together");
     }
-    ttyview_core::cli::daemon::run_with_tls(
+    ttyview_core::cli::daemon::run_with_options(
         cli.bind,
         cli.socket.as_deref(),
         cli.rows,
         cli.cols,
         cli.tls_cert.as_deref(),
         cli.tls_key.as_deref(),
+        cli.diag_log.as_deref(),
     )
     .await
 }

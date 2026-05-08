@@ -263,6 +263,41 @@ let cells = new Map();   // "r,c" -> <span>
 let ws = null;
 let wsRetryMs = 1000;
 
+// === Diagnostic logging ===
+// Lightweight client telemetry for debugging. Buffered locally,
+// flushed via WS every 1s OR when the buffer hits 64 events.
+// Server drops them silently unless --diag-log is set on the
+// daemon (privacy default). Events MUST contain only metadata —
+// no cell content, no user input text.
+const ttvDiagBuf = [];
+let ttvDiagFlushScheduled = false;
+function ttvDiag(category, data) {
+  ttvDiagBuf.push({
+    ts: Date.now(),
+    cat: category,
+    ...data,
+  });
+  if (ttvDiagBuf.length >= 64) {
+    ttvDiagFlush();
+  } else if (!ttvDiagFlushScheduled) {
+    ttvDiagFlushScheduled = true;
+    setTimeout(() => { ttvDiagFlushScheduled = false; ttvDiagFlush(); }, 1000);
+  }
+}
+function ttvDiagFlush() {
+  if (!ttvDiagBuf.length) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const events = ttvDiagBuf.splice(0, ttvDiagBuf.length);
+  ws.send(JSON.stringify({ t: 'diag', events }));
+}
+// Send any pending events before the page closes (mobile tab swap, reload).
+window.addEventListener('pagehide', ttvDiagFlush);
+window.addEventListener('beforeunload', ttvDiagFlush);
+// Capture uncaught errors
+window.addEventListener('error', (e) => {
+  ttvDiag('error', { msg: String(e.message), src: e.filename, line: e.lineno });
+});
+
 function setStatus(text, cls) {
   $status.textContent = text;
   $status.className = 'status' + (cls ? ' ' + cls : '');
@@ -408,9 +443,21 @@ function flushDiffs() {
   diffRafId = 0;
   const batch = pendingDiffs;
   pendingDiffs = [];
+  let totalCells = 0;
+  const t0 = performance.now();
   for (const d of batch) {
     if (d.p !== activePaneId) continue;
     applyCellDiff(d);
+    totalCells += (d.cells && d.cells.length) || 0;
+  }
+  const dur = performance.now() - t0;
+  // Only log if non-trivial — most flushes are sub-ms with a few cells.
+  if (dur > 4 || totalCells > 100) {
+    ttvDiag('diff-flush', {
+      batch: batch.length,
+      cells: totalCells,
+      dur_ms: +dur.toFixed(2),
+    });
   }
 }
 
@@ -466,9 +513,23 @@ function renderPanePickerList() {
 }
 
 function openPanePicker() {
+  const t0 = performance.now();
   renderPanePickerList();
+  const t1 = performance.now();
   document.getElementById('pane-picker-overlay').classList.add('open');
   document.getElementById('pane-picker-btn').setAttribute('aria-expanded', 'true');
+  const t2 = performance.now();
+  // After current frame paints, log when the user could ACTUALLY see it.
+  requestAnimationFrame(() => {
+    const t3 = performance.now();
+    ttvDiag('picker-open', {
+      render_ms: +(t1 - t0).toFixed(2),
+      class_ms: +(t2 - t1).toFixed(2),
+      paint_ms: +(t3 - t2).toFixed(2),
+      total_ms: +(t3 - t0).toFixed(2),
+      pane_count: panesCache.length,
+    });
+  });
 }
 function closePanePicker() {
   document.getElementById('pane-picker-overlay').classList.remove('open');
@@ -559,38 +620,44 @@ function connectWs() {
 
 async function selectPane(paneId) {
   if (paneId === activePaneId) return;
+  const t0 = performance.now();
   const prevPaneId = activePaneId;
   activePaneId = paneId;
-  // === Synchronous UI feedback in this animation frame ===
-  // Clear stale grid so the user sees the switch happened, even
-  // though /grid hasn't returned yet. Show a spinner overlay via
-  // CSS class. This is the difference between a 1s "did anything
-  // happen?" and an instant "loading the next pane" feel.
   $sbHost.innerHTML = '';
   $primaryHost.innerHTML = '';
   cells = new Map();
   $host.classList.add('loading');
   updatePaneLabel();
   setStatus('loading ' + paneId + '…');
-  // Unsubscribe synchronously (lets server stop sending us cell-diffs
-  // for the old pane immediately, even before grid arrives for new).
   if (ws && ws.readyState === WebSocket.OPEN && prevPaneId) {
     ws.send(JSON.stringify({ t: 'unsub', p: prevPaneId }));
   }
-  // === Async work ===
+  const tSync = performance.now();
   await loadGrid(paneId);
+  const tFetch = performance.now();
   $host.classList.remove('loading');
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ t: 'sub', p: paneId }));
   }
+  ttvDiag('pane-switch', {
+    from: prevPaneId, to: paneId,
+    sync_ms: +(tSync - t0).toFixed(2),
+    fetch_ms: +(tFetch - tSync).toFixed(2),
+    total_ms: +(performance.now() - t0).toFixed(2),
+  });
 }
 
 // Hidden select still works for screen-readers + tests
 $select.addEventListener('change', function() { selectPane($select.value); });
 // Custom picker
 document.getElementById('pane-picker-btn').addEventListener('click', function() {
+  ttvDiag('picker-click', {});
   openPanePicker();
 });
+// Capture taps from the user — useful to confirm "did the click reach JS?"
+document.addEventListener('touchstart', function() {
+  ttvDiag('tap', {});
+}, { passive: true, capture: true });
 document.getElementById('pane-picker-overlay').addEventListener('click', function(e) {
   // Tap outside the panel closes
   if (e.target.id === 'pane-picker-overlay') closePanePicker();

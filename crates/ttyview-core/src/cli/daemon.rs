@@ -14,7 +14,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tracing::{info, warn};
 
 pub async fn run(addr: SocketAddr, socket: Option<&str>, rows: u16, cols: u16) -> Result<()> {
-    run_with_tls(addr, socket, rows, cols, None, None).await
+    run_with_options(addr, socket, rows, cols, None, None, None).await
 }
 
 pub async fn run_with_tls(
@@ -24,6 +24,18 @@ pub async fn run_with_tls(
     cols: u16,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
+) -> Result<()> {
+    run_with_options(addr, socket, rows, cols, tls_cert, tls_key, None).await
+}
+
+pub async fn run_with_options(
+    addr: SocketAddr,
+    socket: Option<&str>,
+    rows: u16,
+    cols: u16,
+    tls_cert: Option<&Path>,
+    tls_key: Option<&Path>,
+    diag_log: Option<&Path>,
 ) -> Result<()> {
     info!("panel daemon starting; tmux socket = {:?}; bind = {addr}", socket);
     let mut store = PaneStore::new(rows, cols);
@@ -72,6 +84,7 @@ pub async fn run_with_tls(
         resized_windows: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        diag_log_path: diag_log.map(|p| p.to_path_buf()),
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {

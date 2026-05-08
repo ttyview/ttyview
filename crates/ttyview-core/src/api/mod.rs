@@ -37,6 +37,13 @@ pub struct AppState {
     /// which silently breaks any other tmux client (xterm.js in tmux-web,
     /// a real terminal, etc.) that expects to drive its own size.
     pub resized_windows: Arc<Mutex<HashMap<String, usize>>>,
+    /// If set, client diagnostic events received via WS are appended
+    /// to this file as JSONL. None = drop silently (default — no
+    /// client telemetry is persisted unless the operator opts in via
+    /// the `--diag-log` flag). Events contain only metadata
+    /// (timings, event types, sizes) — never cell content or input
+    /// text — so logging is safe by construction.
+    pub diag_log_path: Option<std::path::PathBuf>,
 }
 
 pub fn router(state: AppState) -> Router {

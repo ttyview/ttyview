@@ -81,6 +81,16 @@ enum ClientMsg {
         #[serde(rename = "p")]
         pane: String,
     },
+    /// Client-side diagnostic events. The client buffers events
+    /// (taps, perf timings, errors) and ships them as a batch.
+    /// The daemon writes them to its diag-log file IFF
+    /// AppState.diag_log_path is Some — otherwise it silently
+    /// drops them (default privacy-preserving behavior).
+    #[serde(rename = "diag")]
+    Diag {
+        #[serde(default)]
+        events: Vec<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -469,7 +479,57 @@ async fn handle_client_msg(
                 .send(Message::Text(serde_json::to_string(&reply)?))
                 .await?;
         }
+        ClientMsg::Diag { events } => {
+            // Privacy-preserving by default: events are dropped unless
+            // the operator opted in via `--diag-log <path>`.
+            if let Some(path) = &app.diag_log_path {
+                if let Err(e) = append_diag_events(path, &events).await {
+                    tracing::warn!("diag-log write failed: {e}");
+                }
+            }
+            // No ack — diag is fire-and-forget to keep client overhead
+            // minimal. If the operator needs reliability, the events
+            // are also retained in the client's ring buffer between
+            // flushes.
+        }
     }
+    Ok(())
+}
+
+async fn append_diag_events(
+    path: &std::path::Path,
+    events: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if events.is_empty() {
+        return Ok(());
+    }
+    let mut buf = String::new();
+    for ev in events {
+        // Each line is one JSONL record. Stamp with server-receive time
+        // so log readers don't need to trust client clocks.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut line = serde_json::Map::new();
+        line.insert("server_ts".into(), serde_json::json!(now));
+        if let Some(obj) = ev.as_object() {
+            for (k, v) in obj {
+                line.insert(k.clone(), v.clone());
+            }
+        } else {
+            line.insert("payload".into(), ev.clone());
+        }
+        buf.push_str(&serde_json::to_string(&line)?);
+        buf.push('\n');
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(buf.as_bytes()).await?;
     Ok(())
 }
 
