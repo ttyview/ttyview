@@ -340,7 +340,10 @@ async function loadPanes() {
 async function loadGrid(paneId) {
   setStatus('loading…');
   try {
-    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?skip_scrollback=1');
+    // max_scrollback=2000 → pull recent history so the user can scroll
+    // up to read past output. Larger values are heavy for chatty CC
+    // panes (cell-grid JSON is verbose); 2000 is a balance.
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=2000');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const screen = await r.json();
     buildGrid(screen);
