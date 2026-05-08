@@ -30,6 +30,8 @@
     cursor: pointer;
   }
   header select:hover, header button:hover { background: #3d3d3d; }
+  header .font-ctl { display: flex; gap: 2px; }
+  header .font-ctl button { padding: 4px 8px; min-width: 28px; }
   header .status { margin-left: auto; color: #888; font-size: 11px; }
   header .status.connected { color: #6ed29a; }
   header .status.error { color: #f48771; }
@@ -127,6 +129,12 @@
   <span class="sep">·</span>
   <select id="pane-select"></select>
   <button id="refresh" title="Refresh pane list">↻</button>
+  <span class="font-ctl">
+    <button id="font-down" title="Smaller font">A−</button>
+    <button id="font-fit" title="Auto-fit pane to viewport">↔</button>
+    <button id="font-up" title="Larger font">A+</button>
+  </span>
+  <button id="scroll-bottom" title="Scroll to live tail">↓</button>
   <span class="status" id="status">disconnected</span>
 </header>
 
@@ -268,6 +276,15 @@ function buildGrid(screen) {
     }
     $primaryHost.appendChild(row);
   }
+  // Track pane width for autofit.
+  if (screen.size && Array.isArray(screen.size) && screen.size[1]) {
+    lastPaneCols = screen.size[1];
+  } else if (lines.length && lines[0].cells) {
+    lastPaneCols = lines[0].cells.length;
+  }
+  // Run autofit AFTER cells are in the DOM so probe measurement is
+  // accurate (font may not have loaded yet).
+  requestAnimationFrame(autoFit);
   // Scroll to bottom — show live tail by default.
   $host.scrollTop = $host.scrollHeight;
 }
@@ -382,6 +399,74 @@ $refresh.addEventListener('click', async function() {
   await loadPanes();
   if (activePaneId) await loadGrid(activePaneId);
 });
+
+// === Font size controls ===
+let currentFontPx = parseFloat(localStorage.getItem('ttv-font-size')) || 12;
+let autoFitOn = localStorage.getItem('ttv-autofit') !== 'false'; // default on
+let lastPaneCols = 80;
+
+function applyFont(px) {
+  currentFontPx = Math.max(8, Math.min(28, px));
+  document.documentElement.style.setProperty('--ttv-font-size', currentFontPx + 'px');
+  localStorage.setItem('ttv-font-size', String(currentFontPx));
+}
+
+function measureCharWidth() {
+  // Build a hidden probe with the current font and measure its rendered width.
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:' +
+    "'JetBrains Mono','Cascadia Code','Fira Code',Menlo,Consolas,monospace;font-size:" +
+    currentFontPx + 'px';
+  probe.textContent = 'M'.repeat(40);
+  document.body.appendChild(probe);
+  const w = probe.getBoundingClientRect().width / 40;
+  probe.remove();
+  return w;
+}
+
+function autoFit() {
+  if (!autoFitOn) return;
+  const styles = getComputedStyle($host);
+  const padL = parseFloat(styles.paddingLeft) || 0;
+  const padR = parseFloat(styles.paddingRight) || 0;
+  // Account for vertical scrollbar width if present (~12-15 px on mobile).
+  const sbWidth = $host.offsetWidth - $host.clientWidth;
+  const avail = $host.clientWidth - padL - padR - sbWidth;
+  if (avail <= 0 || lastPaneCols <= 0) return;
+  const charW = measureCharWidth();
+  if (!charW || charW <= 0) return;
+  // Pick the largest font that fits pane_cols × charW into avail.
+  // Iterate down from current; cheaper than a math derivation that
+  // assumes linear scaling (font metrics aren't perfectly linear).
+  const targetCharW = avail / lastPaneCols;
+  const ratio = targetCharW / charW;
+  const target = Math.max(8, Math.min(28, Math.floor(currentFontPx * ratio)));
+  if (target !== currentFontPx) applyFont(target);
+}
+
+document.getElementById('font-down').addEventListener('click', function() {
+  autoFitOn = false; localStorage.setItem('ttv-autofit', 'false');
+  applyFont(currentFontPx - 1);
+});
+document.getElementById('font-up').addEventListener('click', function() {
+  autoFitOn = false; localStorage.setItem('ttv-autofit', 'false');
+  applyFont(currentFontPx + 1);
+});
+document.getElementById('font-fit').addEventListener('click', function() {
+  autoFitOn = true; localStorage.setItem('ttv-autofit', 'true');
+  autoFit();
+});
+document.getElementById('scroll-bottom').addEventListener('click', function() {
+  $host.scrollTop = $host.scrollHeight;
+});
+
+// Re-fit on viewport resize (orientation, address-bar collapse, keyboard).
+window.addEventListener('resize', autoFit, { passive: true });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', autoFit, { passive: true });
+}
+
+applyFont(currentFontPx);
 
 // === Input handling ===
 const $input = document.getElementById('input-text');
