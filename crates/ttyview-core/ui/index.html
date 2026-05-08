@@ -59,27 +59,33 @@
     display: flex;                /* always laid out — no display:none toggle */
     flex-direction: column;
     justify-content: flex-end;
-    opacity: 0;
-    pointer-events: none;          /* invisible AND non-interactive when closed */
-    /* Promote to its own compositor layer so the underlying 60k-cell
-       grid does NOT need to be re-rasterized when the overlay's
-       opacity changes. Without this, opacity 0→1 invalidated the
-       paint of the entire viewport-covering layer, which on mobile
-       Chrome with thousands of cells stalled rAF for ~6 seconds. */
-    will-change: opacity;
-    transform: translateZ(0);
+    /* Hide via translate (off-screen), not opacity, so the overlay
+       stays at 100% paint cost only when shown. translate3d is
+       cheap (compositor-only) and reliably promotes to its own
+       layer on mobile Chrome. opacity transitions caused multi-
+       second paint stalls on the user's phone — see diag log
+       2026-05-08 18:08 (paint_ms=6015→1746 with prior opacity-
+       only approach). */
+    transform: translateY(100%);
+    pointer-events: none;
+    transition: transform 150ms ease-out;
+    /* Force a layer */
+    will-change: transform;
+    isolation: isolate;
   }
   #pane-picker-overlay.open {
-    opacity: 1;
+    transform: translateY(0);
     pointer-events: auto;
   }
   #pane-picker-panel {
     background: #1a1a1a;
     border-top: 1px solid #444;
     border-radius: 12px 12px 0 0;
-    max-height: 70vh;
+    max-height: 80vh;
+    /* Account for iOS/Android home indicator + insets when present */
+    padding: 8px 0 calc(8px + env(safe-area-inset-bottom)) 0;
     overflow-y: auto;
-    padding: 8px 0;
+    -webkit-overflow-scrolling: touch;
     box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.5);
   }
   #pane-picker-panel .pp-header {
@@ -589,14 +595,13 @@ async function loadPanes() {
 async function loadGrid(paneId) {
   setStatus('loading…');
   try {
-    // max_scrollback=500 → ~10 viewports of history. Anything more is
-    // a real mobile-Chrome perf cost: 500 rows × 60 cols = 30k cell
-    // <span> elements, plus their inline styles. Tested on a real
-    // phone, more than ~1000 frozen rows started causing multi-second
-    // paint stalls when an overlay's opacity changed (because the
-    // viewport-covering overlay forced a recomposite of all underlying
-    // layers). 500 is the sweet spot.
-    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=500');
+    // max_scrollback=200 → ~4-5 viewports of history. Diag log showed
+    // even at 500 rows (30k cells), mobile Chrome paint stalled
+    // ~1.7s when the picker overlay opacity changed. Going to 200
+    // (~12k cells) puts us comfortably below the threshold. v0.0.3
+    // will add lazy-load-more on scroll-to-top to support reading
+    // deeper history without paying the upfront DOM cost.
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=200');
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const screen = await r.json();
     buildGrid(screen);
