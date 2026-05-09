@@ -656,12 +656,36 @@ window.ttyview = (function() {
     },
     selectPane: function(paneId) { return selectPane(paneId); },
     sendInput: function(paneId, keys) {
-      // Forward via WS; the daemon routes to the right pane via t:'input'.
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      // Forward via WS; daemon routes via t:'input'. Returns boolean
+      // so plugins (Quick Keys, etc.) can give visual feedback when
+      // the send didn't go through (typically WS reconnecting after
+      // an Android Chrome tab-backgrounding cycle). Diag-logged in
+      // both branches — see the inp / inp-skip / inp-throw cats.
       const target = paneId || activePaneId;
-      if (!target) return;
+      const wsState = ws ? ws.readyState : -1;
+      const reason = !ws ? 'no-ws'
+        : ws.readyState !== WebSocket.OPEN ? 'ws-not-open'
+        : !target ? 'no-pane'
+        : null;
+      if (reason) {
+        if (typeof ttvDiag === 'function') {
+          ttvDiag('inp-skip', { reason: reason, ws_state: wsState, pane: target, len: keys.length, src: 'plugin-api' });
+        }
+        return false;
+      }
       const converted = keys.replace(/\n/g, '\r');
-      ws.send(JSON.stringify({ t: 'input', p: target, keys: converted }));
+      try {
+        ws.send(JSON.stringify({ t: 'input', p: target, keys: converted }));
+        if (typeof ttvDiag === 'function') {
+          ttvDiag('inp', { pane: target, len: converted.length, ws_state: wsState, src: 'plugin-api' });
+        }
+        return true;
+      } catch (e) {
+        if (typeof ttvDiag === 'function') {
+          ttvDiag('inp-throw', { msg: String(e && e.message), pane: target, len: keys.length, src: 'plugin-api' });
+        }
+        return false;
+      }
     },
     // === Events ===
     // Emitted: 'pane-changed', 'panes-updated', 'grid-loaded',
@@ -1023,9 +1047,11 @@ function connectWs() {
   if (ws) { try { ws.close(); } catch (e) {} }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(proto + '//' + location.host + '/ws');
+  ttvDiag('ws', { ev: 'connecting', retry_ms: wsRetryMs });
   ws.onopen = function() {
     setStatus('connected', 'connected');
     wsRetryMs = 1000;
+    ttvDiag('ws', { ev: 'open', pane: activePaneId });
     if (activePaneId) {
       ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
     }
@@ -1049,12 +1075,16 @@ function connectWs() {
       }
     }
   };
-  ws.onclose = function() {
+  ws.onclose = function(ev) {
+    ttvDiag('ws', { ev: 'close', code: ev?.code, reason: ev?.reason || '', clean: !!ev?.wasClean, retry_ms: wsRetryMs });
     setStatus('reconnecting in ' + (wsRetryMs/1000) + 's…');
     setTimeout(connectWs, wsRetryMs);
     wsRetryMs = Math.min(wsRetryMs * 2, 15000);
   };
-  ws.onerror = function() { setStatus('ws error', 'error'); };
+  ws.onerror = function() {
+    ttvDiag('ws', { ev: 'error' });
+    setStatus('ws error', 'error');
+  };
 }
 
 async function selectPane(paneId) {
@@ -2034,21 +2064,58 @@ window.ttyview.contributes.terminalView({
 const $input = document.getElementById('input-text');
 const $sendBtn = document.getElementById('send-btn');
 
+// Returns true on success, false if the send couldn't go through. Logs
+// a diag record either way so a "stuck" message is recoverable from
+// ~/.config/ttyview/diag.jsonl. Don't change this to swallow failures
+// without telling the caller — submitInput() depends on the boolean
+// to decide whether to clear the textarea.
 function sendInput(keys) {
-  if (!ws || ws.readyState !== WebSocket.OPEN || !activePaneId) return;
-  // CC's TUI (and bash readline, vim, …) read CR as Enter, not LF.
-  // The textarea produces \n on Enter — convert to \r before forwarding.
+  const wsState = ws ? ws.readyState : -1;   // -1 = no ws object yet
+  const reason = !ws ? 'no-ws'
+    : ws.readyState !== WebSocket.OPEN ? 'ws-not-open'
+    : !activePaneId ? 'no-pane'
+    : null;
+  if (reason) {
+    ttvDiag('inp-skip', { reason: reason, ws_state: wsState, pane: activePaneId, len: keys.length });
+    return false;
+  }
   const converted = keys.replace(/\n/g, '\r');
-  ws.send(JSON.stringify({ t: 'input', p: activePaneId, keys: converted }));
+  try {
+    ws.send(JSON.stringify({ t: 'input', p: activePaneId, keys: converted }));
+    ttvDiag('inp', { pane: activePaneId, len: converted.length, ws_state: wsState });
+    return true;
+  } catch (e) {
+    ttvDiag('inp-throw', { msg: String(e && e.message), pane: activePaneId, len: keys.length });
+    return false;
+  }
 }
 
 function submitInput() {
   const text = $input.value;
   if (!text) return;
   // Append \r so the message gets submitted (vs. just typed into the prompt).
-  sendInput(text + '\r');
+  // CRITICAL: only clear the textarea on confirmed send. Earlier versions
+  // unconditionally cleared, so when the WS happened to be reconnecting
+  // (very common after Android Chrome backgrounded the tab) the message
+  // disappeared with no trace. The "stuck submit" symptom from
+  // 2026-05-09 is this exact bug.
+  const ok = sendInput(text + '\r');
+  if (!ok) {
+    // Visual feedback so the user notices and can retry. setStatus is
+    // the same surface the WS lifecycle uses; reverts on next ws-open.
+    setStatus('not connected — message kept', 'error');
+    flashSendBtnError();
+    return;
+  }
   $input.value = '';
   autoResizeInput();
+}
+
+function flashSendBtnError() {
+  if (!$sendBtn) return;
+  const prev = $sendBtn.style.background;
+  $sendBtn.style.background = '#f48771';
+  setTimeout(function() { $sendBtn.style.background = prev; }, 800);
 }
 
 function autoResizeInput() {
