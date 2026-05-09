@@ -551,35 +551,65 @@ async fn append_diag_events(
 }
 
 fn send_keys_chunked(socket: Option<&str>, pane: &str, keys: &str) -> anyhow::Result<()> {
-    // Send literal text via `tmux send-keys -l`. Chunk at 8KB to be safe.
-    const CHUNK: usize = 8 * 1024;
-    let mut i = 0;
-    let bytes = keys.as_bytes();
-    while i < bytes.len() {
-        let end = (i + CHUNK).min(bytes.len());
-        // Avoid splitting in the middle of a multi-byte UTF-8 sequence.
-        let mut split = end;
-        while split > i && (bytes[split - 1] & 0xc0) == 0x80 {
-            split -= 1;
+    // Strategy: split off the trailing CR (if any) and send it as a
+    // separate `tmux send-keys Enter` call AFTER a short delay. This is
+    // the "paste-then-delayed-Enter" pattern that Claude Code's TUI
+    // requires — a single `send-keys -l <message>\r` lands as a paste
+    // burst where the trailing CR is treated as a soft newline and
+    // submit never fires. The user's "submit didn't work" report on
+    // 2026-05-09 was this: the message reached CC's input box but the
+    // Enter was eaten by paste handling. Symptom in the diag log was
+    // exactly one `inp` event followed by no CC progress.
+    //
+    // Other terminal apps (bash, vim) accept literal CR as Enter, so
+    // we keep that path for non-trailing CR — only the LAST one is
+    // promoted to a real Enter key event.
+    let send_text = |chunk: &str| -> anyhow::Result<()> {
+        if chunk.is_empty() { return Ok(()); }
+        const CHUNK: usize = 8 * 1024;
+        let mut i = 0;
+        let bytes = chunk.as_bytes();
+        while i < bytes.len() {
+            let end = (i + CHUNK).min(bytes.len());
+            let mut split = end;
+            while split > i && (bytes[split - 1] & 0xc0) == 0x80 {
+                split -= 1;
+            }
+            if split == i { split = end; }
+            let part = std::str::from_utf8(&bytes[i..split]).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let mut cmd = std::process::Command::new("tmux");
+            if let Some(s) = socket { cmd.arg("-L").arg(s); }
+            let output = cmd.args(["send-keys", "-l", "-t", pane, part]).output()?;
+            if !output.status.success() {
+                anyhow::bail!("tmux send-keys -l failed: {}",
+                    String::from_utf8_lossy(&output.stderr));
+            }
+            i = split;
         }
-        if split == i {
-            split = end; // single huge codepoint — best-effort
-        }
-        let chunk = std::str::from_utf8(&bytes[i..split]).map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    };
+    let send_enter = || -> anyhow::Result<()> {
         let mut cmd = std::process::Command::new("tmux");
-        if let Some(s) = socket {
-            cmd.arg("-L").arg(s);
-        }
-        let output = cmd
-            .args(["send-keys", "-l", "-t", pane, chunk])
-            .output()?;
+        if let Some(s) = socket { cmd.arg("-L").arg(s); }
+        let output = cmd.args(["send-keys", "-t", pane, "Enter"]).output()?;
         if !output.status.success() {
-            anyhow::bail!(
-                "tmux send-keys failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            anyhow::bail!("tmux send-keys Enter failed: {}",
+                String::from_utf8_lossy(&output.stderr));
         }
-        i = split;
+        Ok(())
+    };
+
+    if keys.ends_with('\r') {
+        let body = &keys[..keys.len() - 1];
+        send_text(body)?;
+        // 50 ms is empirically enough to make CC's paste-detection close
+        // its current paste burst before the Enter arrives. Shorter
+        // delays sometimes still get folded; longer than ~150ms shows
+        // up as visible lag on submit.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        send_enter()?;
+    } else {
+        send_text(keys)?;
     }
     Ok(())
 }
