@@ -87,11 +87,40 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     let tls_key = tls_key.as_deref();
     let diag_log = diag_log.as_deref();
     let registry_url = registry_url.as_deref();
-    // Resolved early — the demo-install path below needs it before
-    // we build AppState.
-    let resolved_config_dir = config_dir.clone().unwrap_or_else(|| {
+    // Resolve the per-instance config dir.
+    //
+    // Default policy: each daemon gets its own dir keyed by bind port,
+    // at `~/.config/ttyview/<port>/`. Running two daemons on different
+    // ports gives independent plugin sets out of the box, with no
+    // `--config-dir` flag needed.
+    //
+    // First-run migration: the legacy single-shared dir was
+    // `~/.config/ttyview/{plugins,installed.json}`. If a fresh
+    // port-keyed dir doesn't exist yet AND the legacy dir has content,
+    // copy it once so existing single-instance users don't lose their
+    // installed plugins on upgrade. Subsequent boots see the per-port
+    // dir already populated and skip the migration.
+    let home_base = {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
         std::path::PathBuf::from(home).join(".config/ttyview")
+    };
+    let resolved_config_dir = config_dir.clone().unwrap_or_else(|| {
+        let dir = home_base.join(addr.port().to_string());
+        // Migrate if needed (sync, one-shot, before any plugin work).
+        let legacy_plugins = home_base.join("plugins");
+        let new_plugins = dir.join("plugins");
+        if !new_plugins.exists() && legacy_plugins.exists() {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                warn!("config_dir migration: create_dir_all({}): {e}", dir.display());
+            } else if let Err(e) = copy_dir_recursive(&legacy_plugins, &new_plugins) {
+                warn!("config_dir migration: copy {} → {}: {e}",
+                    legacy_plugins.display(), new_plugins.display());
+            } else {
+                info!("config_dir migration: copied {} → {}",
+                    legacy_plugins.display(), new_plugins.display());
+            }
+        }
+        dir
     });
     // Install rustls crypto provider once. axum-server (TLS) and reqwest
     // (outbound HTTPS for the remote registry) both use rustls 0.23+,
@@ -213,6 +242,27 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
             .with_graceful_shutdown(shutdown)
             .await
             .context("axum serve")?;
+    }
+    Ok(())
+}
+
+/// One-shot recursive copy used by the legacy → per-port config-dir
+/// migration. Sync (we run it at startup before any async work). Best-
+/// effort: errors propagate up to the caller which logs and falls
+/// through (the per-port dir just stays empty, user can move things
+/// over manually or pass --config-dir).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ty.is_file() {
+            std::fs::copy(&from, &to)?;
+        }
     }
     Ok(())
 }

@@ -1421,12 +1421,56 @@ async function loadAllInstalledPlugins() {
     const data = await res.json();
     const plugins = data.plugins || [];
     for (const p of plugins) {
+      // Skip disabled plugins. The source stays on disk; the user can
+      // flip enabled back on at any time without losing per-plugin
+      // storage. Older installed.json files (before the field existed)
+      // get default true via serde — preserves prior behavior.
+      if (p.enabled === false) continue;
       try { await loadInstalledPlugin(p.id); }
       catch (e) { console.error('failed to boot-load plugin ' + p.id, e); }
     }
   } catch (e) {
     console.error('loadAllInstalledPlugins:', e);
   }
+}
+
+async function setPluginEnabled(id, enabled) {
+  // POST the enabled flag to the daemon, then live-toggle: tear down
+  // contributions when disabling (mirrors the uninstall path but
+  // leaves the file + index entry intact), or fetch+eval the source
+  // when enabling. Per-plugin storage is untouched in either branch.
+  const res = await fetch('/plugins/installed/' + encodeURIComponent(id) + '/enabled', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: !!enabled }),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error('set enabled ' + id + ' → HTTP ' + res.status + ' ' + txt);
+  }
+  if (enabled) {
+    // Re-eval source so contributions register live.
+    await loadInstalledPlugin(id);
+  } else {
+    // Mirror the uninstall live-tear-down: walk every contribution
+    // registry and unregister entries with id matching this plugin.
+    const reg = window.ttyview._internal.registries;
+    for (const map of [reg.terminalView, reg.headerWidget, reg.tabBar, reg.inputAccessory, reg.settingsTab, reg.command, reg.theme]) {
+      if (map && map.has(id)) {
+        const def = map.get(id);
+        map.delete(id);
+        const kind = (map === reg.terminalView) ? 'terminalView'
+          : (map === reg.headerWidget) ? 'headerWidget'
+          : (map === reg.tabBar) ? 'tabBar'
+          : (map === reg.inputAccessory) ? 'inputAccessory'
+          : (map === reg.settingsTab) ? 'settingsTab'
+          : (map === reg.command) ? 'command'
+          : 'theme';
+        window.ttyview._internal.emit(kind + '-unregistered', def);
+      }
+    }
+  }
+  return true;
 }
 
 // =============================================================
@@ -1600,7 +1644,8 @@ async function loadAllInstalledPlugins() {
         fetch('/plugins/registry').then(r => r.json()),
         fetch('/plugins/installed').then(r => r.json()),
       ]);
-      const installedIds = new Set((installed.plugins || []).map(p => p.id));
+      const installedById = new Map((installed.plugins || []).map(p => [p.id, p]));
+      const installedIds = new Set(installedById.keys());
       el.innerHTML = '';
       const intro = document.createElement('p');
       intro.style.cssText = 'color:#888;font-size:12px;margin:0 0 12px;';
@@ -1632,6 +1677,12 @@ async function loadAllInstalledPlugins() {
           inst.className = 'badge active';
           inst.textContent = 'installed';
           row.appendChild(inst);
+          if (installedById.get(p.id)?.enabled === false) {
+            const dis = document.createElement('span');
+            dis.className = 'badge builtin';
+            dis.textContent = 'disabled';
+            row.appendChild(dis);
+          }
         }
         card.appendChild(row);
         const meta = document.createElement('div'); meta.className = 'meta';
@@ -1658,6 +1709,26 @@ async function loadAllInstalledPlugins() {
               console.error(e);
             }
           });
+          // Enable/Disable — toggle without losing per-plugin storage
+          // or removing the file. Disable tears down contributions live;
+          // Enable re-evals the source.
+          const isEnabled = installedById.get(p.id)?.enabled !== false;
+          const toggle = document.createElement('button');
+          toggle.textContent = isEnabled ? 'Disable' : 'Enable';
+          toggle.style.cssText = btn.style.cssText;
+          toggle.addEventListener('click', async function() {
+            toggle.disabled = true;
+            toggle.textContent = (isEnabled ? 'Disabling…' : 'Enabling…');
+            try {
+              await setPluginEnabled(p.id, !isEnabled);
+              renderDiscoverTab(el);
+            } catch (e) {
+              toggle.textContent = (isEnabled ? 'Disable failed' : 'Enable failed');
+              console.error(e);
+            }
+          });
+          actions.appendChild(toggle);
+
           // "Reinstall" — pulls the latest bundle source over the
           // on-disk copy. Useful when the daemon ships a fix but the
           // user's installed-plugin file is stale (boot loader serves

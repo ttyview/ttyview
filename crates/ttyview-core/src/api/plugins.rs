@@ -43,6 +43,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/plugins/installed/:id/source", get(get_installed_source))
         .route("/plugins/install", post(install_plugin))
         .route("/plugins/uninstall/:id", delete(uninstall_plugin))
+        .route("/plugins/installed/:id/enabled", post(set_enabled))
 }
 
 // === Storage helpers ===
@@ -68,7 +69,16 @@ pub struct InstalledPlugin {
     pub source: String,
     /// Unix epoch ms when this install succeeded.
     pub installed_at: u64,
+    /// Plugin is loaded + active when true. When false, the source
+    /// stays on disk and the entry stays in the index, but the boot
+    /// loader skips eval'ing it. The user can flip this back without
+    /// losing per-plugin storage state. Default true (preserves old
+    /// behavior for installed.json files written before this field
+    /// existed).
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
+fn default_enabled() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct InstalledIndex {
@@ -344,6 +354,9 @@ async fn install_from_bundle(config_dir: &std::path::Path, id: &str) -> Result<I
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     let mut idx = read_installed_index(config_dir).await;
     idx.schema = 1;
+    // Preserve enabled state across reinstall — user might have
+    // disabled a plugin and is just refreshing the source.
+    let prev_enabled = idx.plugins.iter().find(|p| p.id == entry.id).map(|p| p.enabled);
     idx.plugins.retain(|p| p.id != entry.id);
     let plugin = InstalledPlugin {
         id: entry.id.clone(),
@@ -353,6 +366,7 @@ async fn install_from_bundle(config_dir: &std::path::Path, id: &str) -> Result<I
         kind: entry.kind.clone(),
         source: installed_filename,
         installed_at: now_ms(),
+        enabled: prev_enabled.unwrap_or(true),
     };
     idx.plugins.push(plugin.clone());
     write_installed_index(config_dir, &idx).await?;
@@ -394,7 +408,10 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
 
     let mut idx = read_installed_index(&config_dir).await;
     idx.schema = 1;
-    idx.plugins.retain(|p| p.id != entry.id);  // dedupe — reinstall replaces
+    // Preserve enabled state on reinstall (Reinstall button is for
+    // refreshing the source, not toggling enable).
+    let prev_enabled = idx.plugins.iter().find(|p| p.id == entry.id).map(|p| p.enabled);
+    idx.plugins.retain(|p| p.id != entry.id);
     let plugin = InstalledPlugin {
         id: entry.id.clone(),
         name: entry.name.clone(),
@@ -403,6 +420,7 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
         kind: entry.kind.clone(),
         source: installed_filename,
         installed_at: now_ms(),
+        enabled: prev_enabled.unwrap_or(true),
     };
     idx.plugins.push(plugin.clone());
     write_installed_index(&config_dir, &idx).await?;
@@ -429,6 +447,56 @@ async fn uninstall_plugin(
         Ok(()) => (StatusCode::OK, Json(UninstallResp { ok: true, error: None })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(UninstallResp { ok: false, error: Some(e) })),
     }
+}
+
+// === Enable / disable ===
+//
+// Disable: keeps the source on disk and the index entry intact, just
+// flips `enabled: false` so the boot loader skips evaluating it. The
+// client also tears down live contributions for an instant effect.
+// Enable: flips back to true; client re-fetches + re-evals the source.
+// Per-plugin storage (window.ttyview.storage('<id>')) is not touched
+// in either direction — the win over uninstall is exactly that.
+
+#[derive(Debug, Deserialize)]
+struct SetEnabledReq { enabled: bool }
+
+#[derive(Debug, Serialize)]
+struct SetEnabledResp {
+    ok: bool,
+    enabled: Option<bool>,
+    error: Option<String>,
+}
+
+async fn set_enabled(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SetEnabledReq>,
+) -> impl IntoResponse {
+    if app.read_only {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(SetEnabledResp { ok: false, enabled: None, error: Some("read-only mode: enable/disable disabled".into()) }),
+        );
+    }
+    let mut idx = read_installed_index(&app.config_dir).await;
+    let mut found = false;
+    for p in idx.plugins.iter_mut() {
+        if p.id == id { p.enabled = req.enabled; found = true; break; }
+    }
+    if !found {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(SetEnabledResp { ok: false, enabled: None, error: Some(format!("not installed: {id}")) }),
+        );
+    }
+    if let Err(e) = write_installed_index(&app.config_dir, &idx).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(SetEnabledResp { ok: false, enabled: None, error: Some(e) }),
+        );
+    }
+    (StatusCode::OK, Json(SetEnabledResp { ok: true, enabled: Some(req.enabled), error: None }))
 }
 
 async fn uninstall_inner(config_dir: &std::path::Path, id: &str) -> Result<(), String> {
