@@ -22,13 +22,11 @@ IMAGE_FAMILY=debian-12
 IMAGE_PROJECT=debian-cloud
 GCLOUD=/snap/bin/gcloud
 
-# Where the ttyview-daemon + ttyview-sandbox binaries are pulled from.
-# We grab the GitHub release artifacts (built by .github/workflows/release.yml).
-RELEASE_TAG=v0.1.0
-DAEMON_URL="https://github.com/ttyview/ttyview/releases/download/${RELEASE_TAG}/ttyview-daemon-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
-# ttyview-sandbox binary isn't in v0.1.0 yet (added after the tag).
-# For the first deploy we scp it directly. After v0.1.1+ we'll pull from
-# the release like the daemon.
+# For the first deploy we scp both binaries from the local target/release
+# directory — the --demo / --read-only flags + the sandbox crate landed
+# after v0.1.0 was tagged, so the GitHub release artifacts are stale.
+# After v0.1.1+ we'll pull from the release like a normal install.
+DAEMON_LOCAL=/home/eyalev/projects/personal/2026-05/ttyview/target/release/ttyview-daemon
 SANDBOX_LOCAL=/home/eyalev/projects/personal/2026-05/ttyview/target/release/ttyview-sandbox
 
 # 1. VM
@@ -69,14 +67,16 @@ echo "==> hostname: $HOSTNAME"
 # 3. Wait for SSH
 echo "==> waiting for SSH"
 for i in {1..30}; do
-  if "$GCLOUD" compute ssh "$VM" --zone "$ZONE" --project "$PROJECT" --command 'echo ok' --tunnel-through-iap=false 2>/dev/null | grep -q ok; then
+  if "$GCLOUD" compute ssh "$VM" --zone "$ZONE" --project "$PROJECT" --command 'echo ok' 2>/dev/null | grep -q ok; then
     break
   fi
   sleep 5
 done
 
-# 4. Copy ttyview-sandbox binary up
-echo "==> copying ttyview-sandbox to VM"
+# 4. Copy binaries up
+echo "==> copying ttyview-daemon + ttyview-sandbox to VM"
+"$GCLOUD" compute scp "$DAEMON_LOCAL" "$VM":/tmp/ttyview-daemon \
+  --zone "$ZONE" --project "$PROJECT"
 "$GCLOUD" compute scp "$SANDBOX_LOCAL" "$VM":/tmp/ttyview-sandbox \
   --zone "$ZONE" --project "$PROJECT"
 
@@ -93,10 +93,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo 
 sudo apt-get update -qq
 sudo apt-get install -y -qq caddy
 
-echo '== install ttyview-daemon =='
-sudo curl -fsSL '$DAEMON_URL' -o /tmp/ttv.tar.gz
-sudo tar -xzf /tmp/ttv.tar.gz -C /tmp
-sudo install -m 0755 \$(find /tmp -name ttyview-daemon -type f | head -1) /usr/local/bin/ttyview-daemon
+echo '== install binaries =='
+sudo install -m 0755 /tmp/ttyview-daemon /usr/local/bin/ttyview-daemon
 sudo install -m 0755 /tmp/ttyview-sandbox /usr/local/bin/ttyview-sandbox
 
 echo '== curated tmux session for Tier 2 (spectator) =='
