@@ -60,6 +60,10 @@ pub struct AppState {
     /// CC transcript is the bundled demo conversation. Used for hosting
     /// a public "try it" link where visitors need zero setup.
     pub demo_mode: bool,
+    /// Per-instance config directory. Holds the installed-plugins dir
+    /// (`<config_dir>/plugins/`) and `installed.json`. Two daemons
+    /// with different config_dir values share zero state.
+    pub config_dir: std::path::PathBuf,
 }
 
 pub fn router(state: AppState) -> Router {

@@ -47,17 +47,14 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 // === Storage helpers ===
 
-fn plugins_dir() -> PathBuf {
-    // ~/.config/ttyview/plugins/. Falls back to /tmp if HOME is unset
-    // (containers, sandbox tests). Failure to write here = install fails
-    // with a 500, which is the right behavior — better than silently
-    // writing to /tmp where the user can't find it.
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".config/ttyview/plugins")
+/// Resolve the per-instance plugins directory from AppState's config_dir.
+/// Two daemons with different `--config-dir` values share zero state.
+fn plugins_dir_for(config_dir: &std::path::Path) -> PathBuf {
+    config_dir.join("plugins")
 }
 
-fn installed_index_path() -> PathBuf {
-    plugins_dir().join("installed.json")
+fn installed_index_path_for(config_dir: &std::path::Path) -> PathBuf {
+    plugins_dir_for(config_dir).join("installed.json")
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -83,20 +80,20 @@ pub struct InstalledIndex {
 
 fn default_schema() -> u8 { 1 }
 
-async fn read_installed_index() -> InstalledIndex {
-    let path = installed_index_path();
+async fn read_installed_index(config_dir: &std::path::Path) -> InstalledIndex {
+    let path = installed_index_path_for(config_dir);
     match fs::read(&path).await {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => InstalledIndex::default(),
     }
 }
 
-async fn write_installed_index(idx: &InstalledIndex) -> Result<(), String> {
-    let dir = plugins_dir();
+async fn write_installed_index(config_dir: &std::path::Path, idx: &InstalledIndex) -> Result<(), String> {
+    let dir = plugins_dir_for(config_dir);
     fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
-    let path = installed_index_path();
+    let path = installed_index_path_for(config_dir);
     let json = serde_json::to_vec_pretty(idx)
         .map_err(|e| format!("serialize index: {e}"))?;
     fs::write(&path, json)
@@ -256,17 +253,20 @@ async fn load_registry(app: Arc<AppState>) -> Result<RegistryFile, StatusCode> {
 
 // === Installed handlers ===
 
-async fn list_installed() -> Json<InstalledIndex> {
-    Json(read_installed_index().await)
+async fn list_installed(State(app): State<Arc<AppState>>) -> Json<InstalledIndex> {
+    Json(read_installed_index(&app.config_dir).await)
 }
 
-async fn get_installed_source(Path(id): Path<String>) -> Result<Response, StatusCode> {
+async fn get_installed_source(
+    State(app): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, StatusCode> {
     // Look up the entry to find its source filename — same anti-traversal
     // pattern as get_registry_source. The id must match an installed
     // entry; we never serve arbitrary files from plugins_dir().
-    let idx = read_installed_index().await;
+    let idx = read_installed_index(&app.config_dir).await;
     let entry = idx.plugins.iter().find(|p| p.id == id).ok_or(StatusCode::NOT_FOUND)?;
-    let path = plugins_dir().join(&entry.source);
+    let path = plugins_dir_for(&app.config_dir).join(&entry.source);
     let bytes = fs::read(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -308,9 +308,9 @@ async fn install_plugin(
 /// Auto-install a curated set of plugins for `--demo` mode so visitors
 /// land on a presentable page without any clicks. Best-effort: any
 /// failure logs + falls through (the page still works, just less rich).
-pub async fn demo_install_curated() -> Result<(), String> {
+pub async fn demo_install_curated(config_dir: &std::path::Path) -> Result<(), String> {
     for id in ["ttyview-cc", "ttyview-terminal-green"] {
-        match install_from_bundle(id).await {
+        match install_from_bundle(config_dir, id).await {
             Ok(_) => tracing::info!(target: "ttyview::demo", "auto-installed: {id}"),
             Err(e) => tracing::warn!(target: "ttyview::demo", "auto-install {id}: {e}"),
         }
@@ -321,7 +321,7 @@ pub async fn demo_install_curated() -> Result<(), String> {
 /// Bundle-only install path — used by demo_install_curated() to avoid
 /// the AppState requirement of install_inner. Identical write behavior;
 /// no remote-source fallback (demo runs offline by construction).
-async fn install_from_bundle(id: &str) -> Result<InstalledPlugin, String> {
+async fn install_from_bundle(config_dir: &std::path::Path, id: &str) -> Result<InstalledPlugin, String> {
     let registry_bytes = CommunityPlugins::get("registry.json")
         .ok_or_else(|| "no bundled registry.json".to_string())?;
     let registry: RegistryFile = serde_json::from_slice(&registry_bytes.data)
@@ -333,7 +333,7 @@ async fn install_from_bundle(id: &str) -> Result<InstalledPlugin, String> {
         .ok_or_else(|| format!("not in registry: {id}"))?;
     let asset = CommunityPlugins::get(&entry.source)
         .ok_or_else(|| format!("source {} not in bundle", entry.source))?;
-    let dir = plugins_dir();
+    let dir = plugins_dir_for(config_dir);
     fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("create_dir_all: {e}"))?;
@@ -342,7 +342,7 @@ async fn install_from_bundle(id: &str) -> Result<InstalledPlugin, String> {
     fs::write(&path, asset.data.as_ref())
         .await
         .map_err(|e| format!("write {}: {e}", path.display()))?;
-    let mut idx = read_installed_index().await;
+    let mut idx = read_installed_index(config_dir).await;
     idx.schema = 1;
     idx.plugins.retain(|p| p.id != entry.id);
     let plugin = InstalledPlugin {
@@ -355,11 +355,12 @@ async fn install_from_bundle(id: &str) -> Result<InstalledPlugin, String> {
         installed_at: now_ms(),
     };
     idx.plugins.push(plugin.clone());
-    write_installed_index(&idx).await?;
+    write_installed_index(config_dir, &idx).await?;
     Ok(plugin)
 }
 
 async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, String> {
+    let config_dir = app.config_dir.clone();
     let registry = load_registry(app).await.map_err(|s| format!("load registry: {s:?}"))?;
     let entry = registry
         .plugins
@@ -378,7 +379,7 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
             .into_owned()
     };
 
-    let dir = plugins_dir();
+    let dir = plugins_dir_for(&config_dir);
     fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("create_dir_all({}): {e}", dir.display()))?;
@@ -391,7 +392,7 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
         .await
         .map_err(|e| format!("write {}: {e}", path.display()))?;
 
-    let mut idx = read_installed_index().await;
+    let mut idx = read_installed_index(&config_dir).await;
     idx.schema = 1;
     idx.plugins.retain(|p| p.id != entry.id);  // dedupe — reinstall replaces
     let plugin = InstalledPlugin {
@@ -404,7 +405,7 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
         installed_at: now_ms(),
     };
     idx.plugins.push(plugin.clone());
-    write_installed_index(&idx).await?;
+    write_installed_index(&config_dir, &idx).await?;
     Ok(plugin)
 }
 
@@ -424,15 +425,14 @@ async fn uninstall_plugin(
             Json(UninstallResp { ok: false, error: Some("read-only mode: uninstall disabled".into()) }),
         );
     }
-    let _ = app;
-    match uninstall_inner(&id).await {
+    match uninstall_inner(&app.config_dir, &id).await {
         Ok(()) => (StatusCode::OK, Json(UninstallResp { ok: true, error: None })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(UninstallResp { ok: false, error: Some(e) })),
     }
 }
 
-async fn uninstall_inner(id: &str) -> Result<(), String> {
-    let mut idx = read_installed_index().await;
+async fn uninstall_inner(config_dir: &std::path::Path, id: &str) -> Result<(), String> {
+    let mut idx = read_installed_index(config_dir).await;
     let before = idx.plugins.len();
     let mut to_delete: Vec<String> = Vec::new();
     idx.plugins.retain(|p| {
@@ -446,8 +446,8 @@ async fn uninstall_inner(id: &str) -> Result<(), String> {
     if idx.plugins.len() == before {
         return Err(format!("not installed: {id}"));
     }
-    write_installed_index(&idx).await?;
-    let dir = plugins_dir();
+    write_installed_index(config_dir, &idx).await?;
+    let dir = plugins_dir_for(config_dir);
     for f in to_delete {
         let _ = fs::remove_file(dir.join(f)).await;  // best-effort
     }

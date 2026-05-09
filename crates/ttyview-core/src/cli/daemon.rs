@@ -41,6 +41,10 @@ pub struct RunOptions {
     pub registry_url: Option<String>,
     pub demo_mode: bool,
     pub read_only: bool,
+    /// Per-instance config dir. None = default ($HOME/.config/ttyview).
+    /// Holds installed plugins + their index. Browsers further isolate
+    /// per-origin localStorage automatically.
+    pub config_dir: Option<std::path::PathBuf>,
 }
 
 pub async fn run_with_options_v2(opts: RunOptions) -> Result<()> {
@@ -68,6 +72,7 @@ pub async fn run_with_options(
         registry_url: registry_url.map(String::from),
         demo_mode: false,
         read_only: false,
+        config_dir: None,
     }).await
 }
 
@@ -75,13 +80,19 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     let RunOptions {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
-        demo_mode, read_only,
+        demo_mode, read_only, config_dir,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
     let tls_key = tls_key.as_deref();
     let diag_log = diag_log.as_deref();
     let registry_url = registry_url.as_deref();
+    // Resolved early — the demo-install path below needs it before
+    // we build AppState.
+    let resolved_config_dir = config_dir.clone().unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join(".config/ttyview")
+    });
     // Install rustls crypto provider once. axum-server (TLS) and reqwest
     // (outbound HTTPS for the remote registry) both use rustls 0.23+,
     // which refuses to pick a default provider when more than one is
@@ -109,7 +120,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         // Auto-install the curated demo plugins so the page lands in a
         // presentable state on first visit. Best-effort — log on
         // failure but don't block startup.
-        if let Err(e) = crate::api::plugins::demo_install_curated().await {
+        if let Err(e) = crate::api::plugins::demo_install_curated(&resolved_config_dir).await {
             warn!("demo: auto-install failed: {e}");
         }
     } else {
@@ -153,6 +164,8 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         info!("read-only mode — input + plugin install/uninstall disabled");
     }
 
+    info!("config_dir: {}", resolved_config_dir.display());
+
     // 2. Build HTTP+WS app and serve.
     let app = crate::api::router(AppState {
         store: store.clone(),
@@ -164,6 +177,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         registry_url: registry_url.map(String::from),
         read_only,
         demo_mode,
+        config_dir: resolved_config_dir,
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {

@@ -75,6 +75,20 @@ struct Cli {
     /// visitors keystroke control.
     #[arg(long)]
     read_only: bool,
+
+    /// Per-instance config directory. Default: $HOME/.config/ttyview.
+    /// Holds the installed plugins (`<dir>/plugins/`) and the
+    /// `installed.json` index. Useful for running multiple daemons
+    /// with different plugin sets:
+    ///
+    ///   ttyview-daemon --bind :7785 --config-dir ~/.config/ttyview-a
+    ///   ttyview-daemon --bind :7786 --config-dir ~/.config/ttyview-b
+    ///
+    /// Browser localStorage is already keyed per-origin (port), so the
+    /// active view, theme, layout, and per-plugin storage are also
+    /// isolated across instances automatically.
+    #[arg(long)]
+    config_dir: Option<PathBuf>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -99,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         // demo implies read-only — there's no real PTY for input to land in.
         demo_mode: cli.demo,
         read_only: cli.read_only || cli.demo,
+        config_dir: cli.config_dir.clone(),
     })
     .await
 }
