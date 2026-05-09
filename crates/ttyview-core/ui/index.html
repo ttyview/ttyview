@@ -323,41 +323,36 @@
     touch-action: pan-y;
   }
 
-  /* Tab-bar row — horizontally-scrolling tab list above the grid.
-     Plugins (typically just one — the bundled ttyview-tabs) mount a
-     row of tab buttons. Hidden until at least one plugin contributes. */
-  #tab-bar {
-    flex: none;
-    display: flex;
-    gap: 4px;
-    padding: 4px 6px;
-    background: var(--ttv-bg-elev);
-    border-bottom: 1px solid var(--ttv-border);
-    overflow-x: auto;
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-  #tab-bar[hidden] { display: none; }
-  #tab-bar::-webkit-scrollbar { display: none; }
-  #tab-bar .tb-slot { display: inline-flex; gap: 4px; }
-
-  /* Input accessory row — horizontally-scrolling buttons above the
-     input. Plugins mount slots inline; only visible when at least one
-     plugin contributes (the [hidden] attribute toggles via JS). */
-  #input-accessory {
+  /* Slot rows — three of them (above-grid, below-grid, above-input)
+     share the same horizontal-scroll layout. The layout customizer
+     (Settings → Layout) lets the user move widgets between these
+     and the header-right slot. Each is hidden until at least one
+     plugin contributes; the mounter toggles [hidden]. */
+  [data-slot="above-grid"],
+  [data-slot="below-grid"],
+  [data-slot="above-input"] {
     flex: none;
     display: flex;
     gap: 4px;
     padding: 4px 8px;
     background: var(--ttv-bg-elev);
-    border-top: 1px solid #333;
     overflow-x: auto;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
   }
-  #input-accessory[hidden] { display: none; }
-  #input-accessory::-webkit-scrollbar { display: none; }
-  #input-accessory .ia-slot { display: inline-flex; gap: 4px; }
-  #input-accessory button {
+  [data-slot="above-grid"]   { border-bottom: 1px solid var(--ttv-border); }
+  [data-slot="below-grid"]   { border-top: 1px solid var(--ttv-border); border-bottom: 1px solid var(--ttv-border); }
+  [data-slot="above-input"]  { border-top: 1px solid #333; }
+  [data-slot][hidden] { display: none; }
+  [data-slot]::-webkit-scrollbar { display: none; }
+  [data-slot] .tb-slot,
+  [data-slot] .ia-slot { display: inline-flex; gap: 4px; }
+  /* Buttons in the row slots share styling regardless of which kind
+     of widget mounted them. Header buttons keep their own header-only
+     styling (smaller, no row chrome). */
+  [data-slot="above-grid"] button,
+  [data-slot="below-grid"] button,
+  [data-slot="above-input"] button {
     flex: none;
     background: var(--ttv-bg-elev2);
     color: var(--ttv-fg);
@@ -369,7 +364,9 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  #input-accessory button:active { background: var(--ttv-border); }
+  [data-slot="above-grid"] button:active,
+  [data-slot="below-grid"] button:active,
+  [data-slot="above-input"] button:active { background: var(--ttv-border); }
 
   /* Input row at bottom — send keys back to tmux. */
   #input-row {
@@ -514,7 +511,7 @@
   </span>
   <button id="scroll-bottom" title="Scroll to live tail">↓</button>
   <button id="settings-btn" title="Settings">⚙</button>
-  <span id="header-widgets"><!-- plugin-rendered widgets land here --></span>
+  <span id="header-widgets" data-slot="header-right"><!-- plugin-rendered widgets land here --></span>
   <span class="status" id="status">disconnected</span>
 </header>
 
@@ -528,7 +525,7 @@
 <!-- tabBar plugins mount a horizontal-scroll row of buttons here.
      Hidden by default; appears once any plugin contributes (the
      [hidden] attribute is toggled by the mounter). -->
-<div id="tab-bar" hidden></div>
+<div id="tab-bar" data-slot="above-grid" hidden></div>
 
 <!-- Mount point for the active terminal-view plugin. Cell-grid (the
      default plugin) creates its own #sb-host + #primary-host children
@@ -553,9 +550,14 @@
   </div>
 </div>
 
+<!-- A user-controllable slot between the grid and the input. Hidden
+     by default; the layout customizer can move widgets into it from
+     other slots. Same horizontal-scroll style as the other rows. -->
+<div id="below-grid" data-slot="below-grid" hidden></div>
+
 <!-- inputAccessory plugins mount horizontal-scroll button rows here.
      Empty by default; appears once any plugin contributes. -->
-<div id="input-accessory" hidden></div>
+<div id="input-accessory" data-slot="above-input" hidden></div>
 
 <div id="input-row">
   <textarea id="input-text" placeholder="Message" rows="1"></textarea>
@@ -807,133 +809,156 @@ window.ttyview = (function() {
   });
 })();
 
-// === Header-widget mounting ===
-// Plugins contribute via window.ttyview.contributes.headerWidget(def).
-// We listen for register/unregister events and mount each widget into
-// its own slot inside #header-widgets. Errors during a single widget's
-// render() are caught so a buggy plugin can't blank the whole header.
+// === Unified widget mounter (slot-aware) ===
+// Three contribution kinds — headerWidget / inputAccessory / tabBar —
+// share the same mount lifecycle. They differ only in their default
+// slot. The user can override each plugin's slot via the layout
+// customizer in Settings → Layout, persisted in
+// localStorage['ttv-layout'] as { <pluginId>: <slotId> }.
+//
+// Slots are looked up by `[data-slot=<id>]` so adding a new slot is
+// HTML-only — no JS change needed beyond updating SLOTS below.
 (function() {
-  const $hw = document.getElementById('header-widgets');
-  if (!$hw) return;
-  const mounted = new Map();  // pluginId -> { slot, unmount }
+  // Public list of moveable slots. Order matters for the layout-tab
+  // dropdown (top to bottom of the page).
+  const SLOTS = [
+    { id: 'header-right', name: 'Header (right)' },
+    { id: 'above-grid',   name: 'Above grid' },
+    { id: 'below-grid',   name: 'Below grid' },
+    { id: 'above-input',  name: 'Above input' },
+  ];
+  const KIND_DEFAULT_SLOT = {
+    headerWidget:   'header-right',
+    tabBar:         'above-grid',
+    inputAccessory: 'above-input',
+  };
+  const SLOT_KINDS = ['headerWidget', 'tabBar', 'inputAccessory'];
+  const SLOT_INNER_CLASS = {
+    'header-right': 'hw-slot',
+    'above-grid':   'tb-slot',
+    'below-grid':   'tb-slot',
+    'above-input':  'ia-slot',
+  };
 
-  function mountWidget(def) {
-    if (mounted.has(def.id)) return;  // re-register is a no-op
-    const slot = document.createElement('span');
-    slot.className = 'hw-slot';
-    slot.dataset.pluginId = def.id;
-    slot.style.cssText = 'display:inline-flex;align-items:center;';
-    $hw.appendChild(slot);
+  // ---- layout map (per-plugin slot override) ----
+  const LAYOUT_KEY = 'ttv-layout';
+  function loadLayout() {
+    try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}'); }
+    catch { return {}; }
+  }
+  function saveLayout(m) {
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(m)); } catch {}
+  }
+  let layout = loadLayout();
+
+  // ---- mounting bookkeeping ----
+  // pluginId → { def, kind, slotId, slotEl, unmount }
+  const mounted = new Map();
+
+  function slotElFor(slotId) {
+    return document.querySelector('[data-slot="' + CSS.escape(slotId) + '"]');
+  }
+  function refreshVisibility() {
+    // Hide slot containers that have no inner mounts. Ignore the
+    // header-right slot (always inline in the header chrome).
+    for (const s of SLOTS) {
+      if (s.id === 'header-right') continue;
+      const el = slotElFor(s.id);
+      if (!el) continue;
+      const hasContent = el.querySelector('[data-plugin-id]');
+      el.hidden = !hasContent;
+    }
+  }
+  function resolveSlot(def, kind) {
+    return layout[def.id] || KIND_DEFAULT_SLOT[kind] || 'above-grid';
+  }
+  function mountInto(def, kind, slotId) {
+    if (mounted.has(def.id)) return;
+    const slotEl = slotElFor(slotId);
+    if (!slotEl) {
+      console.warn('[layout] no DOM for slot:', slotId, 'plugin:', def.id);
+      return;
+    }
+    const inner = document.createElement('span');
+    inner.className = SLOT_INNER_CLASS[slotId] || 'hw-slot';
+    inner.dataset.pluginId = def.id;
+    if (slotId === 'header-right') {
+      inner.style.cssText = 'display:inline-flex;align-items:center;';
+    }
+    slotEl.appendChild(inner);
     let unmount = null;
     try {
-      unmount = (typeof def.render === 'function')
-        ? def.render(slot) || null
-        : null;
+      unmount = (typeof def.render === 'function') ? def.render(inner) || null : null;
     } catch (e) {
-      console.error('headerWidget render threw for ' + def.id, e);
+      console.error('[' + kind + '] render threw for ' + def.id, e);
     }
-    mounted.set(def.id, { slot, unmount });
+    mounted.set(def.id, { def, kind, slotId, slotEl: inner, unmount });
+    refreshVisibility();
   }
-
-  function unmountWidget(def) {
-    const m = mounted.get(def.id);
+  function unmountOne(pluginId) {
+    const m = mounted.get(pluginId);
     if (!m) return;
     if (typeof m.unmount === 'function') {
       try { m.unmount(); }
-      catch (e) { console.error('headerWidget unmount threw for ' + def.id, e); }
+      catch (e) { console.error('[' + m.kind + '] unmount threw for ' + pluginId, e); }
     }
-    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
-    mounted.delete(def.id);
-  }
-
-  // Mount any widgets already registered (in case a plugin loaded
-  // before this glue ran — defensive, the order is currently the
-  // other way around but a future ordering change shouldn't break it).
-  for (const def of window.ttyview._internal.registries.headerWidget.values()) {
-    mountWidget(def);
-  }
-  window.ttyview.on('headerWidget-registered', mountWidget);
-  window.ttyview.on('headerWidget-unregistered', unmountWidget);
-})();
-
-// === Input-accessory mounting ===
-// Same shape as the header-widget mounter, but for the row above the
-// input. The container is hidden until at least one accessory mounts.
-(function() {
-  const $ia = document.getElementById('input-accessory');
-  if (!$ia) return;
-  const mounted = new Map();
-
-  function refreshVisibility() { $ia.hidden = mounted.size === 0; }
-
-  function mount(def) {
-    if (mounted.has(def.id)) return;
-    const slot = document.createElement('span');
-    slot.className = 'ia-slot';
-    slot.dataset.pluginId = def.id;
-    $ia.appendChild(slot);
-    let unmount = null;
-    try {
-      unmount = (typeof def.render === 'function') ? def.render(slot) || null : null;
-    } catch (e) {
-      console.error('inputAccessory render threw for ' + def.id, e);
-    }
-    mounted.set(def.id, { slot, unmount });
+    if (m.slotEl && m.slotEl.parentNode) m.slotEl.parentNode.removeChild(m.slotEl);
+    mounted.delete(pluginId);
     refreshVisibility();
   }
-  function unmount(def) {
-    const m = mounted.get(def.id);
-    if (!m) return;
-    if (typeof m.unmount === 'function') {
-      try { m.unmount(); } catch (e) { console.error('inputAccessory unmount threw for ' + def.id, e); }
-    }
-    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
-    mounted.delete(def.id);
-    refreshVisibility();
-  }
-  for (const def of window.ttyview._internal.registries.inputAccessory.values()) mount(def);
-  window.ttyview.on('inputAccessory-registered', mount);
-  window.ttyview.on('inputAccessory-unregistered', unmount);
-})();
+  function unmountByDef(def) { unmountOne(def.id); }
 
-// === Tab-bar mounting ===
-// Same shape as the input-accessory mounter, but for the row above
-// the grid. Hidden until at least one plugin contributes.
-(function() {
-  const $tb = document.getElementById('tab-bar');
-  if (!$tb) return;
-  const mounted = new Map();
-
-  function refreshVisibility() { $tb.hidden = mounted.size === 0; }
-
-  function mount(def) {
-    if (mounted.has(def.id)) return;
-    const slot = document.createElement('span');
-    slot.className = 'tb-slot';
-    slot.dataset.pluginId = def.id;
-    $tb.appendChild(slot);
-    let unmount = null;
-    try {
-      unmount = (typeof def.render === 'function') ? def.render(slot) || null : null;
-    } catch (e) {
-      console.error('tabBar render threw for ' + def.id, e);
+  // Move a widget to a different slot. Used by the layout customizer.
+  function setSlot(pluginId, slotId) {
+    if (!SLOTS.find(s => s.id === slotId)) {
+      throw new Error('unknown slot: ' + slotId);
     }
-    mounted.set(def.id, { slot, unmount });
-    refreshVisibility();
-  }
-  function unmount(def) {
-    const m = mounted.get(def.id);
-    if (!m) return;
-    if (typeof m.unmount === 'function') {
-      try { m.unmount(); } catch (e) { console.error('tabBar unmount threw for ' + def.id, e); }
+    const m = mounted.get(pluginId);
+    if (!m) {
+      // Plugin not currently mounted — just persist and let the next
+      // mount pick it up.
+      layout[pluginId] = slotId;
+      saveLayout(layout);
+      return;
     }
-    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
-    mounted.delete(def.id);
-    refreshVisibility();
+    if (m.slotId === slotId) return;
+    const def = m.def;
+    const kind = m.kind;
+    unmountOne(pluginId);
+    layout[pluginId] = slotId;
+    saveLayout(layout);
+    mountInto(def, kind, slotId);
+    window.ttyview._internal.emit('widget-moved', { pluginId, slotId });
   }
-  for (const def of window.ttyview._internal.registries.tabBar.values()) mount(def);
-  window.ttyview.on('tabBar-registered', mount);
-  window.ttyview.on('tabBar-unregistered', unmount);
+
+  // ---- wire the existing kinds ----
+  function attachKind(kind) {
+    function onReg(def)   { mountInto(def, kind, resolveSlot(def, kind)); }
+    function onUnreg(def) { unmountByDef(def); }
+    for (const def of window.ttyview._internal.registries[kind].values()) onReg(def);
+    window.ttyview.on(kind + '-registered',   onReg);
+    window.ttyview.on(kind + '-unregistered', onUnreg);
+  }
+  for (const kind of SLOT_KINDS) attachKind(kind);
+
+  // ---- expose for the layout customizer + tests ----
+  window.ttyview._internal.layout = {
+    SLOTS,
+    KIND_DEFAULT_SLOT,
+    SLOT_KINDS,
+    getMounted: function() {
+      // Snapshot for UI rendering — don't expose the live Map's defs etc.
+      return Array.from(mounted.entries()).map(function(e) {
+        return { pluginId: e[0], kind: e[1].kind, slotId: e[1].slotId, name: e[1].def.name || e[1].def.id };
+      });
+    },
+    setSlot: setSlot,
+    resetSlot: function(pluginId) {
+      const m = mounted.get(pluginId);
+      if (m) setSlot(pluginId, KIND_DEFAULT_SLOT[m.kind]);
+      else { delete layout[pluginId]; saveLayout(layout); }
+    },
+  };
 })();
 
 // === Diagnostic logging ===
@@ -1442,6 +1467,7 @@ async function loadAllInstalledPlugins() {
     const list = [
       { id: 'plugins',  title: 'Plugins' },
       { id: 'discover', title: 'Discover' },
+      { id: 'layout',   title: 'Layout' },
       { id: 'about',    title: 'About' },
     ];
     const reg = window.ttyview._internal.registries.settingsTab;
@@ -1470,6 +1496,8 @@ async function loadAllInstalledPlugins() {
       renderPluginsTab($body);
     } else if (t.id === 'discover') {
       renderDiscoverTab($body);
+    } else if (t.id === 'layout') {
+      renderLayoutTab($body);
     } else if (t.id === 'about') {
       renderAboutTab($body);
     } else if (t.plugin) {
@@ -1677,6 +1705,107 @@ async function loadAllInstalledPlugins() {
       err.className = 'empty';
       err.textContent = 'Failed to load registry: ' + e.message;
       el.appendChild(err);
+    }
+  }
+
+  // === Layout tab ===
+  // Lists every currently-mounted widget grouped by slot. Each row has
+  // a slot dropdown (changes the widget's slot live) and a Reset button
+  // (snaps back to the kind's default). Persisted via the layout map
+  // in localStorage['ttv-layout'].
+  function renderLayoutTab(el) {
+    const layout = window.ttyview._internal.layout;
+    if (!layout) {
+      el.textContent = 'Layout system not available — older platform build?';
+      return;
+    }
+    const intro = document.createElement('p');
+    intro.style.cssText = 'color:var(--ttv-muted);font-size:12px;margin:0 0 16px;';
+    intro.textContent = 'Move widgets between the four named slots. Changes apply immediately and persist across reloads. Plugins not currently mounted (uninstalled, or not yet loaded) don\'t appear here.';
+    el.appendChild(intro);
+
+    const widgets = layout.getMounted();
+    // Group by slot for readability.
+    const bySlot = {};
+    for (const s of layout.SLOTS) bySlot[s.id] = [];
+    for (const w of widgets) {
+      (bySlot[w.slotId] || (bySlot[w.slotId] = [])).push(w);
+    }
+
+    for (const slot of layout.SLOTS) {
+      const h = document.createElement('h3');
+      h.textContent = slot.name + ' (' + (bySlot[slot.id]?.length || 0) + ')';
+      el.appendChild(h);
+      const items = bySlot[slot.id] || [];
+      if (items.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = '—';
+        el.appendChild(empty);
+        continue;
+      }
+      for (const w of items) {
+        const card = document.createElement('div');
+        card.className = 'plugin-card';
+        const row = document.createElement('div'); row.className = 'row';
+        const name = document.createElement('span'); name.className = 'name';
+        name.textContent = w.name;
+        row.appendChild(name);
+        const kindBadge = document.createElement('span');
+        kindBadge.className = 'badge builtin';
+        kindBadge.textContent = w.kind;
+        row.appendChild(kindBadge);
+        const defaultSlot = layout.KIND_DEFAULT_SLOT[w.kind];
+        if (w.slotId !== defaultSlot) {
+          const moved = document.createElement('span');
+          moved.className = 'badge active';
+          moved.textContent = 'moved';
+          row.appendChild(moved);
+        }
+        card.appendChild(row);
+        const meta = document.createElement('div'); meta.className = 'meta';
+        meta.textContent = 'id: ' + w.pluginId;
+        card.appendChild(meta);
+
+        const ctrl = document.createElement('div');
+        ctrl.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;';
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'color:var(--ttv-muted);font-size:12px;';
+        lbl.textContent = 'Slot:';
+        const sel = document.createElement('select');
+        sel.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 8px;border-radius:4px;font-size:12px;';
+        for (const s of layout.SLOTS) {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = s.name + (s.id === defaultSlot ? '  (default for ' + w.kind + ')' : '');
+          if (s.id === w.slotId) opt.selected = true;
+          sel.appendChild(opt);
+        }
+        sel.addEventListener('change', function() {
+          try {
+            layout.setSlot(w.pluginId, sel.value);
+            renderLayoutTab(el);  // refresh so badges update
+          } catch (e) {
+            console.error('setSlot:', e);
+            sel.value = w.slotId;  // revert dropdown
+          }
+        });
+        ctrl.appendChild(lbl);
+        ctrl.appendChild(sel);
+
+        if (w.slotId !== defaultSlot) {
+          const reset = document.createElement('button');
+          reset.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+          reset.textContent = 'Reset';
+          reset.addEventListener('click', function() {
+            layout.resetSlot(w.pluginId);
+            renderLayoutTab(el);
+          });
+          ctrl.appendChild(reset);
+        }
+        card.appendChild(ctrl);
+        el.appendChild(card);
+      }
     }
   }
 
