@@ -9,8 +9,8 @@ Three live demos, no install needed:
 | URL | What you get |
 | --- | --- |
 | [Static demo](https://ttyview-demo-970754302332.us-central1.run.app/) | Bundled CC chat transcript + theme switcher + plugin installer. Cloud Run, free-tier. |
-| [Spectator](https://34.132.26.75.sslip.io/spectator/) | Live read-only view of `top` running in a real tmux session on a GCE VM. Input is blocked. |
-| [Sandbox](https://34.132.26.75.sslip.io/sandbox/) | Click "Start a session" → get your own ephemeral shell + tmux + plugin install. Self-destructs after 15 min idle. |
+| [Spectator](https://spectator.34.132.26.75.sslip.io/) | Live read-only view of `top` running in a real tmux session on a GCE VM. Input is blocked. |
+| [Sandbox](https://sandbox.34.132.26.75.sslip.io/) | Click "Start a session" → get your own ephemeral shell + tmux + plugin install. Self-destructs after 15 min idle. |
 
 
 Run a daemon on your machine; it attaches read-only to your tmux sessions and exposes a structured cell-grid + live cell-diff stream over HTTP/WebSocket. Open the daemon's URL in any browser — see your live tmux session rendered.
