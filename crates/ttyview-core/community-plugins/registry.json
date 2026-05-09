@@ -72,6 +72,15 @@
       "author": "ttyview",
       "kind": "theme",
       "source": "ttyview-nord.js"
+    },
+    {
+      "id": "ttyview-tabs",
+      "name": "Pinned Tabs",
+      "description": "Adds a horizontal tab row above the grid for quick switching between pinned panes. Tap to switch, '+' to pin the current pane, long-press to unpin. State persists across reloads, by session-name (so the tabs survive tmux server restarts that mint new pane ids).",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "tabBar",
+      "source": "ttyview-tabs.js"
     }
   ]
 }

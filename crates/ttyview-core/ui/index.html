@@ -323,6 +323,24 @@
     touch-action: pan-y;
   }
 
+  /* Tab-bar row — horizontally-scrolling tab list above the grid.
+     Plugins (typically just one — the bundled ttyview-tabs) mount a
+     row of tab buttons. Hidden until at least one plugin contributes. */
+  #tab-bar {
+    flex: none;
+    display: flex;
+    gap: 4px;
+    padding: 4px 6px;
+    background: var(--ttv-bg-elev);
+    border-bottom: 1px solid var(--ttv-border);
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  #tab-bar[hidden] { display: none; }
+  #tab-bar::-webkit-scrollbar { display: none; }
+  #tab-bar .tb-slot { display: inline-flex; gap: 4px; }
+
   /* Input accessory row — horizontally-scrolling buttons above the
      input. Plugins mount slots inline; only visible when at least one
      plugin contributes (the [hidden] attribute toggles via JS). */
@@ -507,6 +525,11 @@
   </div>
 </div>
 
+<!-- tabBar plugins mount a horizontal-scroll row of buttons here.
+     Hidden by default; appears once any plugin contributes (the
+     [hidden] attribute is toggled by the mounter). -->
+<div id="tab-bar" hidden></div>
+
 <!-- Mount point for the active terminal-view plugin. Cell-grid (the
      default plugin) creates its own #sb-host + #primary-host children
      inside this. Other plugins can replace the rendering entirely. -->
@@ -582,6 +605,7 @@ window.ttyview = (function() {
     theme: new Map(),         // id -> def {id, name, vars: {key:val}}
     headerWidget: new Map(),  // id -> def {id, name, render(slot)}
     inputAccessory: new Map(), // id -> def {id, name, render(slot)} — row above the chat input
+    tabBar: new Map(),         // id -> def {id, name, render(slot)} — horizontal-scroll row above the grid
   };
   let activeTerminalViewId = null;
   let activeTerminalViewUnmount = null;  // returned by the plugin's render()
@@ -700,6 +724,7 @@ window.ttyview = (function() {
       theme:        makeContributor('theme'),
       headerWidget: makeContributor('headerWidget'),
       inputAccessory: makeContributor('inputAccessory'),
+      tabBar:         makeContributor('tabBar'),
     },
     // === Per-plugin storage (localStorage scoped by plugin id) ===
     storage: pluginStorage,
@@ -869,6 +894,46 @@ window.ttyview = (function() {
   for (const def of window.ttyview._internal.registries.inputAccessory.values()) mount(def);
   window.ttyview.on('inputAccessory-registered', mount);
   window.ttyview.on('inputAccessory-unregistered', unmount);
+})();
+
+// === Tab-bar mounting ===
+// Same shape as the input-accessory mounter, but for the row above
+// the grid. Hidden until at least one plugin contributes.
+(function() {
+  const $tb = document.getElementById('tab-bar');
+  if (!$tb) return;
+  const mounted = new Map();
+
+  function refreshVisibility() { $tb.hidden = mounted.size === 0; }
+
+  function mount(def) {
+    if (mounted.has(def.id)) return;
+    const slot = document.createElement('span');
+    slot.className = 'tb-slot';
+    slot.dataset.pluginId = def.id;
+    $tb.appendChild(slot);
+    let unmount = null;
+    try {
+      unmount = (typeof def.render === 'function') ? def.render(slot) || null : null;
+    } catch (e) {
+      console.error('tabBar render threw for ' + def.id, e);
+    }
+    mounted.set(def.id, { slot, unmount });
+    refreshVisibility();
+  }
+  function unmount(def) {
+    const m = mounted.get(def.id);
+    if (!m) return;
+    if (typeof m.unmount === 'function') {
+      try { m.unmount(); } catch (e) { console.error('tabBar unmount threw for ' + def.id, e); }
+    }
+    if (m.slot && m.slot.parentNode) m.slot.parentNode.removeChild(m.slot);
+    mounted.delete(def.id);
+    refreshVisibility();
+  }
+  for (const def of window.ttyview._internal.registries.tabBar.values()) mount(def);
+  window.ttyview.on('tabBar-registered', mount);
+  window.ttyview.on('tabBar-unregistered', unmount);
 })();
 
 // === Diagnostic logging ===
@@ -1396,7 +1461,9 @@ async function loadAllInstalledPlugins() {
     const reg = window.ttyview._internal.registries;
     const sections = [
       { title: 'Terminal views', map: reg.terminalView },
+      { title: 'Tab bars',       map: reg.tabBar },
       { title: 'Header widgets', map: reg.headerWidget },
+      { title: 'Input accessories', map: reg.inputAccessory },
       { title: 'Settings tabs',  map: reg.settingsTab },
       { title: 'Commands',       map: reg.command },
       { title: 'Themes',         map: reg.theme },
