@@ -1200,9 +1200,31 @@ document.getElementById('pane-picker-btn').addEventListener('click', function() 
   ttvDiag('picker-click', {});
   openPanePicker();
 });
-// Capture taps from the user — useful to confirm "did the click reach JS?"
-document.addEventListener('touchstart', function() {
-  ttvDiag('tap', {});
+// Capture taps from the user. We log target info so a "click went
+// nowhere" bug can be reconstructed from the diag log (which element
+// was hit, which plugin owned it, did a click event ALSO fire).
+function describeTapTarget(el) {
+  if (!el || !el.closest) return null;
+  // Walk up to the nearest interactive element so we get the BUTTON
+  // or [data-plugin-id] container, not a child <span>.
+  const interactive = el.closest('button, [role="button"], [data-plugin-id], a');
+  const t = interactive || el;
+  return {
+    tag: (t.tagName || '').toLowerCase(),
+    id: t.id || null,
+    cls: (t.className && t.className.toString && t.className.toString().slice(0, 64)) || null,
+    plugin: t.closest('[data-plugin-id]')?.dataset?.pluginId || null,
+    text: ((t.textContent || '').trim().slice(0, 40)) || null,
+  };
+}
+document.addEventListener('touchstart', function(e) {
+  ttvDiag('tap', { target: describeTapTarget(e.target) });
+}, { passive: true, capture: true });
+// Also capture click — if click DOESN'T fire after touchstart on a
+// button, that's the synthetic-click-suppression bug we keep hitting
+// when handlers preventDefault on touchstart.
+document.addEventListener('click', function(e) {
+  ttvDiag('click', { target: describeTapTarget(e.target) });
 }, { passive: true, capture: true });
 document.getElementById('pane-picker-overlay').addEventListener('click', function(e) {
   // Tap outside the panel closes
@@ -1608,6 +1630,29 @@ async function loadAllInstalledPlugins() {
               console.error(e);
             }
           });
+          // "Reinstall" — pulls the latest bundle source over the
+          // on-disk copy. Useful when the daemon ships a fix but the
+          // user's installed-plugin file is stale (boot loader serves
+          // from disk, not bundle, so a daemon upgrade alone doesn't
+          // refresh active plugins).
+          const reinstall = document.createElement('button');
+          reinstall.textContent = 'Reinstall';
+          reinstall.style.cssText = btn.style.cssText;
+          reinstall.addEventListener('click', async function() {
+            reinstall.disabled = true;
+            reinstall.textContent = 'Reinstalling…';
+            try {
+              // install_inner already retains-replaces the index entry
+              // and overwrites the file on disk — a plain install POST
+              // is a reinstall when the id already exists.
+              await installPlugin(p.id);
+              renderDiscoverTab(el);
+            } catch (e) {
+              reinstall.textContent = 'Reinstall failed';
+              console.error(e);
+            }
+          });
+          actions.appendChild(reinstall);
         } else {
           btn.textContent = 'Install';
           btn.addEventListener('click', async function() {

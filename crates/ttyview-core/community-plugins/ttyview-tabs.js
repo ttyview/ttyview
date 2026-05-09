@@ -130,14 +130,20 @@
           add.className = 'ttvtab ttvtab-add';
           add.textContent = '+ ' + (active.session || active.id);
           add.title = 'Pin current pane';
-          add.addEventListener('click', function() {
+          add.tabIndex = -1;
+          // pointerup fires on tap regardless of touchstart preventDefault
+          // suppression on Android Chrome (the synthetic-click bug).
+          add.addEventListener('pointerup', function(e) {
+            if (e.button !== undefined && e.button !== 0) return;
+            if (typeof window.ttvDiag === 'function') {
+              window.ttvDiag('tab-tap', { ev: 'pin-current', session: active.session, pane: active.id });
+            }
             pins.push({ id: active.id, session: active.session });
             savePins();
             render();
           });
-          // Don't steal focus from the textarea on mobile.
+          // Cancel default focus-on-mousedown.
           add.addEventListener('mousedown', function(e) { e.preventDefault(); });
-          add.addEventListener('touchstart', function(e) { e.preventDefault(); }, { passive: false });
           slot.appendChild(add);
         }
       }
@@ -145,56 +151,64 @@
       function attachTapHandlers(btn, pin, resolved) {
         let pressTimer = null;
         let longPressed = false;
+        const pinKey = pin.id || pin.session;
 
+        function diag(ev, extra) {
+          if (typeof window.ttvDiag !== 'function') return;
+          window.ttvDiag('tab-tap', Object.assign({ ev: ev, pin: pinKey, resolved: !!resolved }, extra || {}));
+        }
         function clearTimer() {
           if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
         }
-        function startPress() {
+        function startPress(e) {
           longPressed = false;
           clearTimer();
+          diag('start', { ptr: e.pointerType });
           pressTimer = setTimeout(function() {
             longPressed = true;
-            // Enter editing mode for this pin — next click on the tab
-            // (or its × glyph) removes it. Tapping anywhere else
-            // dismisses the editing state.
-            editingId = pin.id || pin.session;
+            editingId = pinKey;
+            diag('long-press');
             render();
           }, LONG_PRESS_MS);
         }
         function endPress(e) {
           clearTimer();
           if (longPressed) {
-            // Long-press ALREADY triggered editing — don't fire click.
+            diag('end', { action: 'long-press-already-fired' });
             longPressed = false;
             return;
           }
-          // Short tap.
-          if (editingId === (pin.id || pin.session)) {
-            // We were in editing mode for this tab → tap unpins it.
-            pins = pins.filter(p => (p.id || p.session) !== (pin.id || pin.session));
+          if (editingId === pinKey) {
+            pins = pins.filter(p => (p.id || p.session) !== pinKey);
             editingId = null;
             savePins();
+            diag('end', { action: 'unpin' });
             render();
             return;
           }
           if (editingId) {
-            // Editing mode was on for a DIFFERENT tab — exit it.
             editingId = null;
+            diag('end', { action: 'dismiss-editing' });
             render();
             return;
           }
-          // Normal tap → switch to the resolved pane (if available).
           if (resolved) {
+            diag('end', { action: 'switch', to: resolved.id });
             tv.selectPane(resolved.id);
+          } else {
+            diag('end', { action: 'no-target' });
           }
         }
-        btn.addEventListener('pointerdown', function(e) { startPress(); });
-        btn.addEventListener('pointerup',   function(e) { endPress(e); });
+        btn.addEventListener('pointerdown',  function(e) { startPress(e); });
+        btn.addEventListener('pointerup',    function(e) { endPress(e); });
         btn.addEventListener('pointerleave', function() { clearTimer(); longPressed = false; });
         btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
-        // Don't steal focus from the textarea on mobile.
+        // Cancel default focus-on-mousedown so the textarea keeps caret.
+        // Don't preventDefault on touchstart — that suppresses the
+        // synthetic click event on Android Chrome and was the root
+        // cause of "tabs row taps don't work" pre-2026-05-09 fix.
         btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
-        btn.addEventListener('touchstart', function(e) { e.preventDefault(); }, { passive: false });
+        btn.tabIndex = -1;
       }
 
       // Re-render whenever the active pane changes or the pane list refreshes
