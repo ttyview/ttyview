@@ -9,3 +9,10 @@ tests/client/node_modules/
 tests/e2e/node_modules/
 tests/e2e/test-results/
 tests/e2e/playwright-report/
+
+# Agent notes — kept locally so future Claude Code / SDK agents can pick
+# up where the last session left off, but explicitly NOT published. If
+# you remove these lines, double-check `git ls-files` doesn't suddenly
+# include CLAUDE.md or .claude/ before pushing.
+CLAUDE.md
+.claude/
