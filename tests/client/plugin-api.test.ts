@@ -114,6 +114,10 @@ describe('window.ttyview plugin API', () => {
     // Drill into Plugins → cards with the registered terminal views appear.
     const pluginsRow = Array.from(masterItems).find((n: any) => n.querySelector('span').textContent === 'Plugins') as any;
     pluginsRow.click();
+    // renderPluginsTab is async (fetches /plugins/installed). The mock
+    // doesn't define that route — the fetch rejects, the catch logs and
+    // continues, then cards from registries render. Give it a tick.
+    await new Promise(r => setTimeout(r, 50));
     const cards = overlay.querySelectorAll('.plugin-card .name');
     const names = Array.from(cards).map((n: any) => n.textContent);
     expect(names).toContain('Cell Grid');

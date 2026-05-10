@@ -1794,109 +1794,262 @@ async function setPluginEnabled(id, enabled) {
     }
   }
 
-  function renderPluginsTab(el) {
+  // Plugins tab — one card per plugin (deduplicated across contribution
+  // kinds), Obsidian-style. Per-row toggle switch for enable/disable
+  // (only on installed plugins; core ones registered by the daemon's
+  // inline JS get a "core" badge and no toggle). Sort: enabled first
+  // (alphabetical within each group), disabled below — deviates from
+  // Obsidian's flat-alphabetical-mixed but matches the ttyview user's
+  // explicit preference. Also keeps the per-contribution Activate /
+  // Deactivate / ⚙ Settings actions for terminalView / theme / plugins
+  // with a settingsTab.
+  async function renderPluginsTab(el) {
+    el.innerHTML = '<div class="empty">Loading…</div>';
+    let installedList = [];
+    try {
+      const r = await fetch('/plugins/installed');
+      installedList = (await r.json()).plugins || [];
+    } catch (e) {
+      console.error('renderPluginsTab: /plugins/installed:', e);
+    }
+    const installedById = new Map(installedList.map(p => [p.id, p]));
     const reg = window.ttyview._internal.registries;
-    const sections = [
-      { title: 'Terminal views', map: reg.terminalView },
-      { title: 'Pane pickers',   map: reg.panePickerList },
-      { title: 'Tab bars',       map: reg.tabBar },
-      { title: 'Header widgets', map: reg.headerWidget },
-      { title: 'Input accessories', map: reg.inputAccessory },
-      { title: 'Settings tabs',  map: reg.settingsTab },
-      { title: 'Commands',       map: reg.command },
-      { title: 'Themes',         map: reg.theme },
-    ];
-    for (const sec of sections) {
-      const h = document.createElement('h3');
-      h.textContent = sec.title + ' (' + sec.map.size + ')';
-      el.appendChild(h);
-      if (sec.map.size === 0) {
-        const p = document.createElement('div');
-        p.className = 'empty';
-        p.textContent = 'No ' + sec.title.toLowerCase() + ' registered.';
-        el.appendChild(p);
-        continue;
+    const KIND_LABEL = {
+      terminalView:   'terminal view',
+      panePickerList: 'pane picker',
+      tabBar:         'tab bar',
+      headerWidget:   'header widget',
+      inputAccessory: 'input accessory',
+      settingsTab:    'settings tab',
+      command:        'command',
+      theme:          'theme',
+    };
+    const KIND_ORDER = ['terminalView','panePickerList','tabBar','headerWidget','inputAccessory','settingsTab','command','theme'];
+
+    // Build per-plugin record. ID is the dedup key. Plugins whose
+    // contributions are CURRENTLY registered come from registries;
+    // disabled installed plugins don't appear in registries (their
+    // source isn't eval'd at boot) so we add them from installedList.
+    const byId = new Map();
+    function rec(id) {
+      if (!byId.has(id)) byId.set(id, {
+        id, name: id, description: '', kinds: new Set(),
+        defs: {}, isCore: !installedById.has(id),
+      });
+      return byId.get(id);
+    }
+    for (const kind of KIND_ORDER) {
+      for (const def of reg[kind].values()) {
+        const r = rec(def.id);
+        r.name = def.name || def.title || def.id;
+        if (def.description) r.description = def.description;
+        r.kinds.add(kind);
+        r.defs[kind] = def;
       }
-      for (const def of sec.map.values()) {
-        const card = document.createElement('div');
-        card.className = 'plugin-card';
-        const row = document.createElement('div'); row.className = 'row';
-        const name = document.createElement('span'); name.className = 'name';
-        name.textContent = def.name || def.title || def.id;
-        row.appendChild(name);
-        const builtin = document.createElement('span');
-        builtin.className = 'badge builtin';
-        builtin.textContent = 'built-in';
-        row.appendChild(builtin);
-        const isActiveTerm = sec.title === 'Terminal views' &&
-            def.id === window.ttyview._internal.getActiveTerminalViewId();
-        const isActiveTheme = sec.title === 'Themes' &&
-            def.id === window.ttyview._internal.getActiveThemeId();
-        if (isActiveTerm || isActiveTheme) {
-          const active = document.createElement('span');
-          active.className = 'badge active';
-          active.textContent = 'active';
-          row.appendChild(active);
-        }
-        card.appendChild(row);
-        const meta = document.createElement('div'); meta.className = 'meta';
-        meta.textContent = 'id: ' + def.id;
-        card.appendChild(meta);
-        if (def.description) {
-          const d = document.createElement('div'); d.className = 'desc';
-          d.textContent = def.description;
-          card.appendChild(d);
-        }
-        // Action buttons. Three categories:
-        //   - Themes: Activate / Deactivate
-        //   - Terminal views: Activate
-        //   - Anything with a matching settingsTab: ⚙ Settings (jumps
-        //     to that tab in the same overlay). Skipped on the Settings
-        //     tabs section itself to avoid the trivial self-link.
-        const hasSettingsTab = reg.settingsTab.has(def.id) && sec.title !== 'Settings tabs';
-        const wantsActions = sec.title === 'Themes' || sec.title === 'Terminal views' || hasSettingsTab;
-        if (wantsActions) {
-          const actions = document.createElement('div');
-          actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;';
-          const btnStyle = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
-          if (sec.title === 'Themes') {
-            const btn = document.createElement('button');
-            btn.style.cssText = btnStyle;
-            btn.textContent = isActiveTheme ? 'Deactivate' : 'Activate';
-            btn.addEventListener('click', function() {
-              window.ttyview._internal.setActiveThemeId(isActiveTheme ? null : def.id);
-              render();
-            });
-            actions.appendChild(btn);
-          } else if (sec.title === 'Terminal views') {
-            const btn = document.createElement('button');
-            btn.style.cssText = btnStyle;
-            btn.textContent = isActiveTerm ? 'Active' : 'Activate';
-            btn.disabled = isActiveTerm;
-            if (!isActiveTerm) btn.addEventListener('click', function() {
-              window.ttyview._internal.setActiveTerminalViewId(def.id);
-              render();
-            });
-            actions.appendChild(btn);
-          }
-          if (hasSettingsTab) {
-            const sbtn = document.createElement('button');
-            sbtn.style.cssText = btnStyle;
-            sbtn.textContent = '⚙ Settings';
-            sbtn.title = 'Open this plugin\'s settings tab';
-            sbtn.addEventListener('click', function() {
-              // Use the same drill-in path as a master-list click so
-              // narrow-viewport users get the back arrow + detail
-              // takeover; wide-viewport users see the active row
-              // highlight on the left.
-              selectItem({ id: def.id });
-            });
-            actions.appendChild(sbtn);
-          }
-          card.appendChild(actions);
-        }
-        el.appendChild(card);
+    }
+    // Add disabled plugins (installed but not registered).
+    for (const ip of installedList) {
+      if (!byId.has(ip.id)) {
+        const r = rec(ip.id);
+        r.name = ip.name || ip.id;
+        r.description = ip.description || '';
+        if (ip.kind) r.kinds.add(ip.kind);
       }
+    }
+
+    // Hide command-only contributions (e.g. `terminal-view.activate:cell-grid`)
+    // — those aren't user-facing plugins, they're palette entries owned
+    // by their parent plugin. A real plugin would also contribute a
+    // terminalView/theme/panePickerList/etc.
+    for (const [id, r] of byId) {
+      if (r.kinds.size === 1 && r.kinds.has('command')) byId.delete(id);
+    }
+
+    // Sort: enabled first (alphabetical), then disabled (alphabetical).
+    function isEnabled(r) {
+      // Core plugins (cell-grid) are always enabled by definition;
+      // installed plugins use their installed.json `enabled` field.
+      if (r.isCore) return true;
+      const ip = installedById.get(r.id);
+      return ip ? (ip.enabled !== false) : true;
+    }
+    const all = Array.from(byId.values());
+    all.sort((a, b) => {
+      const ea = isEnabled(a), eb = isEnabled(b);
+      if (ea !== eb) return ea ? -1 : 1;
+      return (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
+    });
+
+    el.innerHTML = '';
+    if (all.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No plugins registered.';
+      el.appendChild(empty);
+      return;
+    }
+    // One-shot CSS for the toggle switch. Idempotent — checked by id.
+    if (!document.getElementById('plugin-toggle-style')) {
+      const st = document.createElement('style');
+      st.id = 'plugin-toggle-style';
+      st.textContent = `
+        .pl-toggle {
+          position: relative; display: inline-block;
+          width: 38px; height: 22px; flex: none;
+        }
+        .pl-toggle input { opacity: 0; width: 0; height: 0; }
+        .pl-toggle .pl-slider {
+          position: absolute; cursor: pointer; inset: 0;
+          background: var(--ttv-bg-elev2);
+          border: 1px solid var(--ttv-border);
+          border-radius: 22px;
+          transition: background 120ms;
+        }
+        .pl-toggle .pl-slider::before {
+          content: ''; position: absolute;
+          height: 16px; width: 16px; left: 2px; top: 2px;
+          background: var(--ttv-muted);
+          border-radius: 50%;
+          transition: transform 120ms, background 120ms;
+        }
+        .pl-toggle input:checked + .pl-slider {
+          background: rgba(110,210,154,0.28);
+          border-color: var(--ttv-accent);
+        }
+        .pl-toggle input:checked + .pl-slider::before {
+          transform: translateX(16px);
+          background: var(--ttv-accent);
+        }
+        .pl-toggle input:disabled + .pl-slider { cursor: not-allowed; opacity: 0.5; }
+        .plugin-card.disabled .name { opacity: 0.65; }
+        .plugin-card.disabled .desc { opacity: 0.55; }
+      `;
+      document.head.appendChild(st);
+    }
+
+    let lastEnabled = null;
+    for (const p of all) {
+      const enabled = isEnabled(p);
+      // Section dividers — "Enabled" / "Disabled" headers.
+      if (lastEnabled !== enabled) {
+        const h = document.createElement('h3');
+        h.textContent = enabled ? 'Enabled' : 'Disabled';
+        h.style.cssText = 'margin-top:18px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--ttv-muted);font-weight:500;';
+        if (lastEnabled === null) h.style.marginTop = '0';
+        el.appendChild(h);
+        lastEnabled = enabled;
+      }
+
+      const card = document.createElement('div');
+      card.className = 'plugin-card' + (enabled ? '' : ' disabled');
+
+      // Header row: name on left, toggle on right.
+      const head = document.createElement('div');
+      head.style.cssText = 'display:flex;align-items:center;gap:10px;';
+      const nameWrap = document.createElement('div');
+      nameWrap.style.cssText = 'flex:1;min-width:0;';
+      const name = document.createElement('div');
+      name.className = 'name';
+      name.textContent = p.name;
+      nameWrap.appendChild(name);
+      // Kind line — small grey "kinds: terminal view, theme" subtitle.
+      const kinds = Array.from(p.kinds).map(k => KIND_LABEL[k] || k);
+      if (kinds.length) {
+        const subtitle = document.createElement('div');
+        subtitle.className = 'meta';
+        subtitle.textContent = kinds.join(' · ');
+        nameWrap.appendChild(subtitle);
+      }
+      head.appendChild(nameWrap);
+
+      // Status badges (right of name, before toggle).
+      const isActiveTerm  = p.defs.terminalView && window.ttyview._internal.getActiveTerminalViewId() === p.id;
+      const isActiveTheme = p.defs.theme        && window.ttyview._internal.getActiveThemeId() === p.id;
+      if (isActiveTerm || isActiveTheme) {
+        const b = document.createElement('span');
+        b.className = 'badge active';
+        b.textContent = 'active';
+        head.appendChild(b);
+      }
+      if (p.isCore) {
+        const b = document.createElement('span');
+        b.className = 'badge builtin';
+        b.textContent = 'core';
+        head.appendChild(b);
+      }
+
+      // Toggle (only for installed plugins; core is always on).
+      if (!p.isCore) {
+        const tog = document.createElement('label');
+        tog.className = 'pl-toggle';
+        tog.title = enabled ? 'Disable' : 'Enable';
+        const input = document.createElement('input');
+        input.type = 'checkbox'; input.checked = enabled;
+        input.addEventListener('change', async function() {
+          input.disabled = true;
+          try {
+            await setPluginEnabled(p.id, input.checked);
+            renderPluginsTab(el);
+          } catch (e) {
+            console.error('toggle ' + p.id + ':', e);
+            input.checked = !input.checked;
+            input.disabled = false;
+          }
+        });
+        const slider = document.createElement('span');
+        slider.className = 'pl-slider';
+        tog.appendChild(input);
+        tog.appendChild(slider);
+        head.appendChild(tog);
+      }
+
+      card.appendChild(head);
+      if (p.description) {
+        const d = document.createElement('div'); d.className = 'desc';
+        d.textContent = p.description;
+        card.appendChild(d);
+      }
+      const meta = document.createElement('div'); meta.className = 'meta';
+      meta.textContent = 'id: ' + p.id;
+      card.appendChild(meta);
+
+      // Action row — Activate / Deactivate (terminalView / theme),
+      // ⚙ Settings (plugin has settingsTab). Hidden when disabled
+      // since contributions aren't registered.
+      const actions = document.createElement('div');
+      actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;';
+      const btnStyle = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+      if (enabled && p.defs.terminalView) {
+        const b = document.createElement('button');
+        b.style.cssText = btnStyle;
+        b.textContent = isActiveTerm ? 'Active' : 'Activate';
+        b.disabled = isActiveTerm;
+        if (!isActiveTerm) b.addEventListener('click', function() {
+          window.ttyview._internal.setActiveTerminalViewId(p.id);
+          renderPluginsTab(el);
+        });
+        actions.appendChild(b);
+      }
+      if (enabled && p.defs.theme) {
+        const b = document.createElement('button');
+        b.style.cssText = btnStyle;
+        b.textContent = isActiveTheme ? 'Deactivate' : 'Activate';
+        b.addEventListener('click', function() {
+          window.ttyview._internal.setActiveThemeId(isActiveTheme ? null : p.id);
+          renderPluginsTab(el);
+        });
+        actions.appendChild(b);
+      }
+      if (enabled && p.defs.settingsTab) {
+        const b = document.createElement('button');
+        b.style.cssText = btnStyle;
+        b.textContent = '⚙ Settings';
+        b.title = 'Open this plugin\'s settings';
+        b.addEventListener('click', function() { selectItem({ id: p.id }); });
+        actions.appendChild(b);
+      }
+      if (actions.childElementCount) card.appendChild(actions);
+      el.appendChild(card);
     }
   }
 

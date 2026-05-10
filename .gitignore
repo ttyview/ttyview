@@ -16,3 +16,4 @@ tests/e2e/playwright-report/
 # include CLAUDE.md or .claude/ before pushing.
 CLAUDE.md
 .claude/
+eval-results/
