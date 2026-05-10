@@ -1021,8 +1021,19 @@ function setStatus(text, cls) {
 
 let panesCache = [];
 
+// Active-pane button label. Just the session name when unambiguous;
+// adds a "(N)" suffix when the same session has multiple panes (1-
+// indexed by position in panesCache for stable numbering across
+// renders). Pane id + size were noise for most users — `%10` is
+// cryptic and the size shows in the daemon status line + picker
+// meta line. The disambiguation suffix is the cheapest fallback
+// that doesn't lose meaning when there ARE duplicates.
 function paneLabel(p) {
-  return p.session + ' (' + p.id + ', ' + p.cols + '×' + p.rows + ')';
+  if (!p) return '—';
+  const same = panesCache.filter(x => x.session === p.session);
+  if (same.length <= 1) return p.session;
+  const idx = same.findIndex(x => x.id === p.id);
+  return p.session + ' (' + (idx + 1) + ')';
 }
 
 function updatePaneLabel() {
@@ -1035,16 +1046,26 @@ function renderPanePickerList() {
   const $list = document.getElementById('pane-picker-list');
   $list.innerHTML = '';
   for (const p of panesCache) {
+    const same = panesCache.filter(x => x.session === p.session);
+    const idx = same.findIndex(x => x.id === p.id);
     const item = document.createElement('div');
     item.className = 'pp-item' + (p.id === activePaneId ? ' active' : '');
     item.setAttribute('role', 'option');
     item.setAttribute('data-pane-id', p.id);
     const sess = document.createElement('span');
     sess.className = 'pp-session';
-    sess.textContent = p.session;
+    // Same disambiguation rule as paneLabel — keeps the picker and
+    // the active-button label visually consistent.
+    sess.textContent = same.length > 1 ? p.session + ' (' + (idx + 1) + ')' : p.session;
+    // Dim meta line under each row — keeps the verbose detail
+    // (pane id, window, size) reachable for power users without
+    // putting it in everyone's face.
     const meta = document.createElement('span');
     meta.className = 'pp-meta';
-    meta.textContent = p.id + ' · ' + p.cols + '×' + p.rows;
+    const parts = [p.id];
+    if (p.window != null) parts.push('w' + p.window);
+    parts.push(p.cols + '×' + p.rows);
+    meta.textContent = parts.join(' · ');
     item.appendChild(sess);
     item.appendChild(meta);
     item.addEventListener('click', function() {
