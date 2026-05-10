@@ -74,6 +74,7 @@
         user-select: none;
         -webkit-user-select: none;
         touch-action: manipulation;
+        min-width: 0;
       }
       .ttvtab:active { filter: brightness(1.15); }
       .ttvtab.active {
@@ -82,10 +83,15 @@
         color: var(--ttv-accent);
       }
       .ttvtab.missing { opacity: 0.45; font-style: italic; }
+      .ttvtab .ttvtab-label {
+        overflow: hidden;
+        min-width: 0;
+      }
       .ttvtab .ttvtab-x {
         font-size: 14px; line-height: 1;
         opacity: 0;
         transition: opacity 80ms;
+        flex: none;
       }
       .ttvtab.editing .ttvtab-x { opacity: 0.7; }
       .ttvtab.editing { animation: ttvtab-pulse 0.6s infinite alternate; }
@@ -105,6 +111,12 @@
         scrollbar-width: none;
       }
       .ttvtab-row::-webkit-scrollbar { display: none; }
+      /* Fit mode: when maxPerRow is set, each row distributes its
+         tabs equally with no horizontal overflow. Labels truncate
+         with middle-ellipsis (applied by JS after layout). */
+      .ttvtab-row.fit { overflow-x: hidden; }
+      .ttvtab-row.fit .ttvtab { flex: 1 1 0; padding-left: 8px; padding-right: 8px; }
+      .ttvtab.fit { flex: 1 1 0; padding-left: 8px; padding-right: 8px; }
     `;
     document.head.appendChild(st);
   }
@@ -122,75 +134,118 @@
       items.push({ kind: 'add', active });
     }
 
-    // Distribute into rows.
+    // Distribute into rows. In fit mode (max > 0) we chunk strictly
+    // by maxPerRow and let rows auto-grow to hold every item; the
+    // `rows` setting becomes a minimum (handy for reserving vertical
+    // space when there are few pins). Without max, the `rows`
+    // setting is irrelevant — a single horizontally-scrolling row.
     const rows = Math.max(1, settings.rows | 0);
     const max  = Math.max(0, settings.maxPerRow | 0);
     let groups;
-    if (rows === 1 || max === 0) {
+    if (max === 0) {
       groups = [items];
     } else {
       groups = [];
-      for (let i = 0; i < items.length && groups.length < rows; i += max) {
+      for (let i = 0; i < items.length; i += max) {
         groups.push(items.slice(i, i + max));
       }
-      // Anything that would have gone in row R+1 spills into the last
-      // row's horizontal-scroll. Keeps every pin reachable.
-      const placed = Math.min(items.length, rows * max);
-      if (items.length > placed) {
-        const overflow = items.slice(placed);
-        if (groups.length === 0) groups.push([]);
-        groups[groups.length - 1] = groups[groups.length - 1].concat(overflow);
-      }
+      while (groups.length < rows) groups.push([]);
       if (groups.length === 0) groups = [items];
     }
 
-    // Container layout: column when multi-row, default (inline-flex
-    // from .tb-slot class) when single-row.
-    if (groups.length > 1) {
+    // Container layout. Fit mode (maxPerRow > 0) always stacks rows
+    // vertically so each row independently fits its slice to row
+    // width. Without fit mode, single-row uses the original inline
+    // flex on the slot; multi-row stacks.
+    const fitMode = max > 0;
+    if (groups.length > 1 || fitMode) {
       mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
     } else {
       mountedSlot.style.cssText = mountedSlotInitial;
     }
 
+    const placedTabs = []; // { el, label, fullText } — for ellipsis pass
     for (const group of groups) {
-      const rowEl = (groups.length > 1)
-        ? Object.assign(document.createElement('div'), { className: 'ttvtab-row' })
+      const rowEl = (groups.length > 1 || fitMode)
+        ? Object.assign(document.createElement('div'), { className: 'ttvtab-row' + (fitMode ? ' fit' : '') })
         : mountedSlot;
       if (rowEl !== mountedSlot) mountedSlot.appendChild(rowEl);
       for (const item of group) {
         if (item.kind === 'pin') {
           const resolved = resolvePin(item.pin, panes);
-          rowEl.appendChild(makeTabButton(item.pin, resolved, active));
+          const made = makeTabButton(item.pin, resolved, active, fitMode);
+          rowEl.appendChild(made.el);
+          if (fitMode) placedTabs.push(made);
         } else if (item.kind === 'add') {
-          rowEl.appendChild(makeAddButton(item.active));
+          const made = makeAddButton(item.active, fitMode);
+          rowEl.appendChild(made.el);
+          if (fitMode) placedTabs.push(made);
         }
       }
     }
+
+    if (fitMode && placedTabs.length) {
+      // Run after layout settles so each label sees its real width.
+      requestAnimationFrame(function() {
+        for (const t of placedTabs) middleEllipsisFit(t.label, t.fullText);
+      });
+    }
   }
 
-  function makeTabButton(pin, resolved, active) {
+  // Fit `fullText` into `el` with middle-ellipsis (start … end) when it
+  // overflows. Binary-searches the kept-char count; O(log n) layout
+  // reads per element. Caller must give the element its final layout
+  // before calling (inside requestAnimationFrame).
+  function middleEllipsisFit(el, fullText) {
+    el.textContent = fullText;
+    if (el.scrollWidth <= el.clientWidth) return;
+    const n = fullText.length;
+    let lo = 1, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      const first = Math.ceil(mid / 2);
+      const last = mid - first;
+      el.textContent = fullText.slice(0, first) + '…' + fullText.slice(n - last);
+      if (el.scrollWidth <= el.clientWidth) lo = mid;
+      else hi = mid - 1;
+    }
+    const first = Math.ceil(lo / 2);
+    const last = lo - first;
+    el.textContent = fullText.slice(0, first) + '…' + fullText.slice(n - last);
+  }
+
+  function makeTabButton(pin, resolved, active, fitMode) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ttvtab';
+    if (fitMode) btn.classList.add('fit');
     if (editingId === pin.id) btn.classList.add('editing');
     if (!resolved) btn.classList.add('missing');
     else if (active && resolved.id === active.id) btn.classList.add('active');
     const label = document.createElement('span');
-    label.textContent = pin.session || pin.id || '?';
+    label.className = 'ttvtab-label';
+    const fullText = pin.session || pin.id || '?';
+    label.textContent = fullText;
+    btn.title = fullText;
     btn.appendChild(label);
     const xs = document.createElement('span');
     xs.className = 'ttvtab-x';
     xs.textContent = '×';
     btn.appendChild(xs);
     attachTapHandlers(btn, pin, resolved);
-    return btn;
+    return { el: btn, label, fullText };
   }
 
-  function makeAddButton(active) {
+  function makeAddButton(active, fitMode) {
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'ttvtab ttvtab-add';
-    add.textContent = '+ ' + (active.session || active.id);
+    if (fitMode) add.classList.add('fit');
+    const label = document.createElement('span');
+    label.className = 'ttvtab-label';
+    const fullText = '+ ' + (active.session || active.id);
+    label.textContent = fullText;
+    add.appendChild(label);
     add.title = 'Pin current pane';
     add.tabIndex = -1;
     add.addEventListener('pointerup', function(e) {
@@ -200,7 +255,7 @@
       render();
     });
     add.addEventListener('mousedown', function(e) { e.preventDefault(); });
-    return add;
+    return { el: add, label, fullText };
   }
 
   function attachTapHandlers(btn, pin, resolved) {
@@ -346,7 +401,7 @@
       container.appendChild(r1);
 
       // Rows
-      const r2 = makeRow('Number of rows', 'How many rows the tabs row spans. Pins flow left-to-right, top-to-bottom; overflow scrolls horizontally in the last row.');
+      const r2 = makeRow('Number of rows', 'Minimum number of rows to reserve. With Max tabs per row > 0, rows auto-grow to fit every pin; this setting is the floor.');
       const rowsInp = document.createElement('input');
       rowsInp.type = 'number'; rowsInp.min = '1'; rowsInp.max = '5';
       rowsInp.value = String(settings.rows);
@@ -360,7 +415,7 @@
       container.appendChild(r2);
 
       // Max per row
-      const r3 = makeRow('Max tabs per row', 'When set, each row holds at most this many tabs before wrapping to the next row. 0 = unlimited (single horizontal scroll).');
+      const r3 = makeRow('Max tabs per row', 'When > 0, each row holds exactly this many tabs distributed equally with no horizontal overflow; long names truncate with middle-ellipsis (start…end). 0 = unlimited, single horizontal scroll.');
       const maxInp = document.createElement('input');
       maxInp.type = 'number'; maxInp.min = '0'; maxInp.max = '50';
       maxInp.value = String(settings.maxPerRow);
