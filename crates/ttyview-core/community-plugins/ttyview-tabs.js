@@ -5,218 +5,261 @@
 // per-plugin storage namespace, keyed by SESSION NAME (with pane id
 // kept as a fast-path resolver) — so the tabs survive a tmux server
 // restart that mints new pane ids, falling back to session-name match.
+//
+// Two contributions sharing state via this IIFE's closure:
+//   - tabBar       — renders the tab buttons in #tab-bar
+//   - settingsTab  — Settings → Pinned Tabs: pin-all-sessions action,
+//                    rows count, max tabs per row
 (function() {
   const tv = window.ttyview;
   if (!tv || tv.apiVersion !== 1) return;
 
   const STORAGE_KEY = 'pins';
+  const SETTINGS_KEY = 'settings';
   const LONG_PRESS_MS = 500;
+  const DEFAULTS = { rows: 1, maxPerRow: 0 };  // 0 = unlimited per row
 
+  const storage = tv.storage('ttyview-tabs');
+
+  // Hoisted state — shared between contributions.
+  let pins = (function() {
+    const v = storage.get(STORAGE_KEY);
+    return Array.isArray(v) ? v : [];
+  })();
+  let settings = Object.assign({}, DEFAULTS, storage.get(SETTINGS_KEY) || {});
+  let editingId = null;
+  let mountedSlot = null;       // set by tabBar render(); null when not mounted
+  let mountedSlotInitial = '';  // restore-on-unmount cssText
+
+  function savePins()      { storage.set(STORAGE_KEY,    pins);     }
+  function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
+
+  function resolvePin(pin, panes) {
+    if (pin.id) {
+      const byId = panes.find(p => p.id === pin.id);
+      if (byId) return byId;
+    }
+    if (pin.session) {
+      const bySess = panes.find(p => p.session === pin.session);
+      if (bySess) {
+        pin.id = bySess.id;
+        savePins();
+        return bySess;
+      }
+    }
+    return null;
+  }
+
+  // ---- styles (one-time inject) ----
+  function ensureStyles() {
+    const styleId = 'ttyview-tabs-style';
+    if (document.getElementById(styleId)) return;
+    const st = document.createElement('style');
+    st.id = styleId;
+    st.textContent = `
+      .ttvtab {
+        flex: none;
+        background: var(--ttv-bg-elev2);
+        color: var(--ttv-fg);
+        border: 1px solid var(--ttv-border);
+        border-radius: 4px;
+        padding: 5px 10px;
+        font-size: 12px;
+        font-family: inherit;
+        white-space: nowrap;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: manipulation;
+      }
+      .ttvtab:active { filter: brightness(1.15); }
+      .ttvtab.active {
+        background: var(--ttv-bg);
+        border-color: var(--ttv-accent);
+        color: var(--ttv-accent);
+      }
+      .ttvtab.missing { opacity: 0.45; font-style: italic; }
+      .ttvtab .ttvtab-x {
+        font-size: 14px; line-height: 1;
+        opacity: 0;
+        transition: opacity 80ms;
+      }
+      .ttvtab.editing .ttvtab-x { opacity: 0.7; }
+      .ttvtab.editing { animation: ttvtab-pulse 0.6s infinite alternate; }
+      @keyframes ttvtab-pulse { from { background: var(--ttv-bg-elev2); } to { background: var(--ttv-border); } }
+      .ttvtab-add {
+        background: transparent;
+        border: 1px dashed var(--ttv-border);
+        color: var(--ttv-muted);
+      }
+      .ttvtab-add:active { color: var(--ttv-accent); border-color: var(--ttv-accent); }
+      /* Multi-row container — one .ttvtab-row per row, each with its
+         own horizontal scroll so a row exceeding maxPerRow can still
+         reach the overflow tabs. */
+      .ttvtab-row {
+        display: flex; gap: 4px; flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .ttvtab-row::-webkit-scrollbar { display: none; }
+    `;
+    document.head.appendChild(st);
+  }
+
+  // ---- core render of the tab area ----
+  function render() {
+    if (!mountedSlot) return;
+    mountedSlot.innerHTML = '';
+    const panes = tv.listPanes();
+    const active = tv.getActivePane();
+
+    // Build the items list (pins + optional pin-current button).
+    const items = pins.slice().map(pin => ({ kind: 'pin', pin }));
+    if (active && !pins.find(p => p.session === active.session)) {
+      items.push({ kind: 'add', active });
+    }
+
+    // Distribute into rows.
+    const rows = Math.max(1, settings.rows | 0);
+    const max  = Math.max(0, settings.maxPerRow | 0);
+    let groups;
+    if (rows === 1 || max === 0) {
+      groups = [items];
+    } else {
+      groups = [];
+      for (let i = 0; i < items.length && groups.length < rows; i += max) {
+        groups.push(items.slice(i, i + max));
+      }
+      // Anything that would have gone in row R+1 spills into the last
+      // row's horizontal-scroll. Keeps every pin reachable.
+      const placed = Math.min(items.length, rows * max);
+      if (items.length > placed) {
+        const overflow = items.slice(placed);
+        if (groups.length === 0) groups.push([]);
+        groups[groups.length - 1] = groups[groups.length - 1].concat(overflow);
+      }
+      if (groups.length === 0) groups = [items];
+    }
+
+    // Container layout: column when multi-row, default (inline-flex
+    // from .tb-slot class) when single-row.
+    if (groups.length > 1) {
+      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
+    } else {
+      mountedSlot.style.cssText = mountedSlotInitial;
+    }
+
+    for (const group of groups) {
+      const rowEl = (groups.length > 1)
+        ? Object.assign(document.createElement('div'), { className: 'ttvtab-row' })
+        : mountedSlot;
+      if (rowEl !== mountedSlot) mountedSlot.appendChild(rowEl);
+      for (const item of group) {
+        if (item.kind === 'pin') {
+          const resolved = resolvePin(item.pin, panes);
+          rowEl.appendChild(makeTabButton(item.pin, resolved, active));
+        } else if (item.kind === 'add') {
+          rowEl.appendChild(makeAddButton(item.active));
+        }
+      }
+    }
+  }
+
+  function makeTabButton(pin, resolved, active) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttvtab';
+    if (editingId === pin.id) btn.classList.add('editing');
+    if (!resolved) btn.classList.add('missing');
+    else if (active && resolved.id === active.id) btn.classList.add('active');
+    const label = document.createElement('span');
+    label.textContent = pin.session || pin.id || '?';
+    btn.appendChild(label);
+    const xs = document.createElement('span');
+    xs.className = 'ttvtab-x';
+    xs.textContent = '×';
+    btn.appendChild(xs);
+    attachTapHandlers(btn, pin, resolved);
+    return btn;
+  }
+
+  function makeAddButton(active) {
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'ttvtab ttvtab-add';
+    add.textContent = '+ ' + (active.session || active.id);
+    add.title = 'Pin current pane';
+    add.tabIndex = -1;
+    add.addEventListener('pointerup', function(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      pins.push({ id: active.id, session: active.session });
+      savePins();
+      render();
+    });
+    add.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    return add;
+  }
+
+  function attachTapHandlers(btn, pin, resolved) {
+    let pressTimer = null;
+    let longPressed = false;
+    const pinKey = pin.id || pin.session;
+    function diag(ev, extra) {
+      if (typeof window.ttvDiag !== 'function') return;
+      window.ttvDiag('tab-tap', Object.assign({ ev: ev, pin: pinKey, resolved: !!resolved }, extra || {}));
+    }
+    function clearTimer() {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    }
+    function startPress(e) {
+      longPressed = false;
+      clearTimer();
+      diag('start', { ptr: e.pointerType });
+      pressTimer = setTimeout(function() {
+        longPressed = true;
+        editingId = pinKey;
+        diag('long-press');
+        render();
+      }, LONG_PRESS_MS);
+    }
+    function endPress(e) {
+      clearTimer();
+      if (longPressed) { longPressed = false; return; }
+      if (editingId === pinKey) {
+        pins = pins.filter(p => (p.id || p.session) !== pinKey);
+        editingId = null;
+        savePins();
+        render();
+        return;
+      }
+      if (editingId) { editingId = null; render(); return; }
+      if (resolved) tv.selectPane(resolved.id);
+    }
+    btn.addEventListener('pointerdown',  function(e) { startPress(e); });
+    btn.addEventListener('pointerup',    function(e) { endPress(e); });
+    btn.addEventListener('pointerleave', function() { clearTimer(); longPressed = false; });
+    btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    btn.tabIndex = -1;
+  }
+
+  // ---- contributions ----
   tv.contributes.tabBar({
     id: 'ttyview-tabs',
     name: 'Pinned Tabs',
     render: function(slot) {
-      // Inline styles so the plugin is self-contained — no external
-      // stylesheet, no class-name collisions with the platform.
-      const styleId = 'ttyview-tabs-style';
-      if (!document.getElementById(styleId)) {
-        const st = document.createElement('style');
-        st.id = styleId;
-        st.textContent = `
-          .ttvtab {
-            flex: none;
-            background: var(--ttv-bg-elev2);
-            color: var(--ttv-fg);
-            border: 1px solid var(--ttv-border);
-            border-radius: 4px;
-            padding: 5px 10px;
-            font-size: 12px;
-            font-family: inherit;
-            white-space: nowrap;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            user-select: none;
-            -webkit-user-select: none;
-            touch-action: manipulation;
-          }
-          .ttvtab:active { filter: brightness(1.15); }
-          .ttvtab.active {
-            background: var(--ttv-bg);
-            border-color: var(--ttv-accent);
-            color: var(--ttv-accent);
-          }
-          .ttvtab.missing { opacity: 0.45; font-style: italic; }
-          .ttvtab .ttvtab-x {
-            font-size: 14px; line-height: 1;
-            opacity: 0;
-            transition: opacity 80ms;
-          }
-          .ttvtab.editing .ttvtab-x { opacity: 0.7; }
-          .ttvtab.editing { animation: ttvtab-pulse 0.6s infinite alternate; }
-          @keyframes ttvtab-pulse { from { background: var(--ttv-bg-elev2); } to { background: var(--ttv-border); } }
-          .ttvtab-add {
-            background: transparent;
-            border: 1px dashed var(--ttv-border);
-            color: var(--ttv-muted);
-          }
-          .ttvtab-add:active { color: var(--ttv-accent); border-color: var(--ttv-accent); }
-        `;
-        document.head.appendChild(st);
-      }
+      ensureStyles();
+      mountedSlot = slot;
+      mountedSlotInitial = slot.style.cssText;
 
-      const storage = tv.storage('ttyview-tabs');
-      // Stored shape: [ { id: '%5', session: 'tmux-web1' } ]
-      let pins = (function() {
-        const v = storage.get(STORAGE_KEY);
-        return Array.isArray(v) ? v : [];
-      })();
-
-      let editingId = null;   // id of tab currently in long-press "remove?" mode
-
-      function savePins() { storage.set(STORAGE_KEY, pins); }
-
-      function resolvePin(pin, panes) {
-        // Fast path: exact pane id match (same tmux server still up).
-        if (pin.id) {
-          const byId = panes.find(p => p.id === pin.id);
-          if (byId) return byId;
-        }
-        // Fallback: session-name match. Handles tmux server restart →
-        // new pane ids; the user picked the session, not a pane snapshot.
-        if (pin.session) {
-          const bySess = panes.find(p => p.session === pin.session);
-          if (bySess) {
-            // Refresh the stored id so future fast-paths hit.
-            pin.id = bySess.id;
-            savePins();
-            return bySess;
-          }
-        }
-        return null;
-      }
-
-      function render() {
-        slot.innerHTML = '';
-        const panes = tv.listPanes();
-        const active = tv.getActivePane();
-        // Existing tabs
-        for (const pin of pins.slice()) {
-          const resolved = resolvePin(pin, panes);
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'ttvtab';
-          if (editingId === pin.id) btn.classList.add('editing');
-          if (!resolved) btn.classList.add('missing');
-          else if (active && resolved.id === active.id) btn.classList.add('active');
-          // Label: prefer session name (stable across restarts).
-          const label = document.createElement('span');
-          label.textContent = pin.session || pin.id || '?';
-          btn.appendChild(label);
-          // Inline x — visible only in editing mode (long-press).
-          const xs = document.createElement('span');
-          xs.className = 'ttvtab-x';
-          xs.textContent = '×';
-          btn.appendChild(xs);
-          attachTapHandlers(btn, pin, resolved);
-          slot.appendChild(btn);
-        }
-        // Pin-current button — only show if active pane isn't already
-        // pinned. Provides obvious affordance for adding tabs.
-        if (active && !pins.find(p => p.session === active.session)) {
-          const add = document.createElement('button');
-          add.type = 'button';
-          add.className = 'ttvtab ttvtab-add';
-          add.textContent = '+ ' + (active.session || active.id);
-          add.title = 'Pin current pane';
-          add.tabIndex = -1;
-          // pointerup fires on tap regardless of touchstart preventDefault
-          // suppression on Android Chrome (the synthetic-click bug).
-          add.addEventListener('pointerup', function(e) {
-            if (e.button !== undefined && e.button !== 0) return;
-            if (typeof window.ttvDiag === 'function') {
-              window.ttvDiag('tab-tap', { ev: 'pin-current', session: active.session, pane: active.id });
-            }
-            pins.push({ id: active.id, session: active.session });
-            savePins();
-            render();
-          });
-          // Cancel default focus-on-mousedown.
-          add.addEventListener('mousedown', function(e) { e.preventDefault(); });
-          slot.appendChild(add);
-        }
-      }
-
-      function attachTapHandlers(btn, pin, resolved) {
-        let pressTimer = null;
-        let longPressed = false;
-        const pinKey = pin.id || pin.session;
-
-        function diag(ev, extra) {
-          if (typeof window.ttvDiag !== 'function') return;
-          window.ttvDiag('tab-tap', Object.assign({ ev: ev, pin: pinKey, resolved: !!resolved }, extra || {}));
-        }
-        function clearTimer() {
-          if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-        }
-        function startPress(e) {
-          longPressed = false;
-          clearTimer();
-          diag('start', { ptr: e.pointerType });
-          pressTimer = setTimeout(function() {
-            longPressed = true;
-            editingId = pinKey;
-            diag('long-press');
-            render();
-          }, LONG_PRESS_MS);
-        }
-        function endPress(e) {
-          clearTimer();
-          if (longPressed) {
-            diag('end', { action: 'long-press-already-fired' });
-            longPressed = false;
-            return;
-          }
-          if (editingId === pinKey) {
-            pins = pins.filter(p => (p.id || p.session) !== pinKey);
-            editingId = null;
-            savePins();
-            diag('end', { action: 'unpin' });
-            render();
-            return;
-          }
-          if (editingId) {
-            editingId = null;
-            diag('end', { action: 'dismiss-editing' });
-            render();
-            return;
-          }
-          if (resolved) {
-            diag('end', { action: 'switch', to: resolved.id });
-            tv.selectPane(resolved.id);
-          } else {
-            diag('end', { action: 'no-target' });
-          }
-        }
-        btn.addEventListener('pointerdown',  function(e) { startPress(e); });
-        btn.addEventListener('pointerup',    function(e) { endPress(e); });
-        btn.addEventListener('pointerleave', function() { clearTimer(); longPressed = false; });
-        btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
-        // Cancel default focus-on-mousedown so the textarea keeps caret.
-        // Don't preventDefault on touchstart — that suppresses the
-        // synthetic click event on Android Chrome and was the root
-        // cause of "tabs row taps don't work" pre-2026-05-09 fix.
-        btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
-        btn.tabIndex = -1;
-      }
-
-      // Re-render whenever the active pane changes or the pane list refreshes
-      // (otherwise the active highlight + "+" affordance stays stale).
+      // Re-read settings on each render so settings-tab edits take
+      // effect even though they live in a different DOM tree.
       const off1 = tv.on('pane-changed',  render);
       const off2 = tv.on('panes-updated', render);
 
-      // Tap-anywhere-else in the tab strip → exit editing mode.
       slot.addEventListener('click', function(e) {
         if (!e.target.closest('.ttvtab') && editingId !== null) {
           editingId = null;
@@ -227,10 +270,108 @@
       render();
       return function unmount() {
         off1(); off2();
-        const st = document.getElementById(styleId);
-        if (st) st.remove();
-        slot.innerHTML = '';
+        mountedSlot = null;
       };
+    },
+  });
+
+  tv.contributes.settingsTab({
+    id: 'ttyview-tabs',
+    title: 'Pinned Tabs',
+    render: function(container) {
+      // Always re-read state on settings-open (cheap; aligns with how
+      // the Pane Picker plugin treats its settings tab).
+      settings = Object.assign({}, DEFAULTS, storage.get(SETTINGS_KEY) || {});
+
+      container.innerHTML = '';
+      const intro = document.createElement('p');
+      intro.style.cssText = 'color:var(--ttv-muted);font-size:12px;margin:0 0 16px;';
+      intro.textContent = 'Customize the pinned tabs row. State is per-browser (localStorage). Changes apply immediately.';
+      container.appendChild(intro);
+
+      function makeRow(label, hint) {
+        const row = document.createElement('div');
+        row.style.cssText = 'margin-bottom:14px;';
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'display:block;font-size:12px;color:var(--ttv-muted);margin-bottom:6px;';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+        if (hint) {
+          const h = document.createElement('div');
+          h.style.cssText = 'color:var(--ttv-muted);font-size:11px;margin-bottom:6px;';
+          h.textContent = hint;
+          row.appendChild(h);
+        }
+        return row;
+      }
+      function btn(text) {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:4px;cursor:pointer;font-size:12px;padding:6px 12px;margin-right:6px;';
+        return b;
+      }
+
+      // Pin all current sessions (+ clear)
+      const r1 = makeRow('Bulk actions', null);
+      const pinAll = btn('Pin all current sessions');
+      pinAll.addEventListener('click', function() {
+        const panes = tv.listPanes();
+        // Dedupe by session name; one pin per unique session.
+        const seen = new Set(pins.map(p => p.session));
+        const uniqueSessions = new Set();
+        for (const p of panes) {
+          if (!seen.has(p.session) && !uniqueSessions.has(p.session)) {
+            uniqueSessions.add(p.session);
+            pins.push({ id: p.id, session: p.session });
+          }
+        }
+        savePins();
+        render();
+        statusEl.textContent = 'Pinned ' + uniqueSessions.size + ' new session' + (uniqueSessions.size === 1 ? '' : 's') + '. Total: ' + pins.length;
+      });
+      const clear = btn('Clear all pins');
+      clear.addEventListener('click', function() {
+        if (!confirm('Remove all ' + pins.length + ' pinned tabs?')) return;
+        pins = [];
+        savePins();
+        render();
+        statusEl.textContent = 'Cleared.';
+      });
+      r1.appendChild(pinAll);
+      r1.appendChild(clear);
+      const statusEl = document.createElement('div');
+      statusEl.style.cssText = 'color:var(--ttv-muted);font-size:11px;margin-top:6px;';
+      statusEl.textContent = pins.length + ' pin' + (pins.length === 1 ? '' : 's') + ' currently.';
+      r1.appendChild(statusEl);
+      container.appendChild(r1);
+
+      // Rows
+      const r2 = makeRow('Number of rows', 'How many rows the tabs row spans. Pins flow left-to-right, top-to-bottom; overflow scrolls horizontally in the last row.');
+      const rowsInp = document.createElement('input');
+      rowsInp.type = 'number'; rowsInp.min = '1'; rowsInp.max = '5';
+      rowsInp.value = String(settings.rows);
+      rowsInp.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:4px;font:inherit;font-size:14px;padding:6px 10px;width:80px;';
+      rowsInp.addEventListener('change', function() {
+        const n = Math.max(1, Math.min(5, parseInt(rowsInp.value, 10) || 1));
+        settings.rows = n; rowsInp.value = String(n);
+        saveSettings(); render();
+      });
+      r2.appendChild(rowsInp);
+      container.appendChild(r2);
+
+      // Max per row
+      const r3 = makeRow('Max tabs per row', 'When set, each row holds at most this many tabs before wrapping to the next row. 0 = unlimited (single horizontal scroll).');
+      const maxInp = document.createElement('input');
+      maxInp.type = 'number'; maxInp.min = '0'; maxInp.max = '50';
+      maxInp.value = String(settings.maxPerRow);
+      maxInp.style.cssText = rowsInp.style.cssText;
+      maxInp.addEventListener('change', function() {
+        const n = Math.max(0, Math.min(50, parseInt(maxInp.value, 10) || 0));
+        settings.maxPerRow = n; maxInp.value = String(n);
+        saveSettings(); render();
+      });
+      r3.appendChild(maxInp);
+      container.appendChild(r3);
     },
   });
 })();
