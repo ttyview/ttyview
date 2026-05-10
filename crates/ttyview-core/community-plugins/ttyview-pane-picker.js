@@ -97,10 +97,12 @@
     const panes = tv.listPanes();
     const active = tv.getActivePane();
 
-    // Recent: panes whose session has a timestamp, sorted desc, top N,
-    // EXCLUDING the currently-active pane (you're already there).
+    // Recent: panes whose session has a timestamp, sorted desc, top N.
+    // Includes the currently-active pane — earlier I excluded it ("no
+    // point, you're already there") but the user wanted it in the
+    // list (it's at the top by recency, gets the .active highlight).
     const withTs = panes
-      .filter(p => recency[p.session] && (!active || p.id !== active.id))
+      .filter(p => recency[p.session])
       .map(p => ({ p, ts: recency[p.session] }))
       .sort((a, b) => b.ts - a.ts)
       .slice(0, Math.max(0, settings.recentCount));
