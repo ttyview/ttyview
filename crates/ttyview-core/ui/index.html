@@ -146,8 +146,9 @@
     border-bottom: 1px solid var(--ttv-border);
     background: var(--ttv-bg-elev);
   }
-  #settings-header .title { flex: 1; font-weight: 600; color: var(--ttv-fg); font-size: 16px; }
-  #settings-close {
+  #settings-header .title { flex: 1; font-weight: 600; color: var(--ttv-fg); font-size: 16px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #settings-close, #settings-back {
     background: transparent;
     color: var(--ttv-fg);
     border: none;
@@ -157,37 +158,74 @@
     line-height: 1;
   }
   #settings-close:hover { color: #f48771; }
-  #settings-tabs {
+  #settings-back { display: none; }    /* shown only on narrow + drilled-in */
+
+  /* Master/detail layout — Obsidian-style. Wide viewport: master
+     (sidebar) always visible on the left, detail on the right.
+     Narrow viewport (≤700px): drill-in — master takes the full
+     panel; tapping a row swaps in the detail with a back arrow. */
+  #settings-content {
+    flex: 1; display: flex; flex-direction: row;
+    min-height: 0;        /* allow children to scroll */
+  }
+  #settings-master {
     flex: none;
-    display: flex; gap: 2px;
-    padding: 8px 8px 0;
-    border-bottom: 1px solid var(--ttv-border);
+    width: 240px;
+    border-right: 1px solid var(--ttv-border);
     background: var(--ttv-bg-elev);
-    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
-  #settings-tabs .tab {
-    padding: 8px 14px;
-    background: transparent;
+  #settings-master .ms-section {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
     color: var(--ttv-muted);
-    border: none;
-    border-bottom: 2px solid transparent;
-    font: inherit;
+    padding: 14px 16px 6px;
+  }
+  #settings-master .ms-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px;
     cursor: pointer;
-    white-space: nowrap;
+    color: var(--ttv-fg);
+    border-bottom: 1px solid var(--ttv-border);
+    font-size: 14px;
+    user-select: none;
   }
-  #settings-tabs .tab:hover { color: var(--ttv-fg); }
-  #settings-tabs .tab.active {
-    color: var(--ttv-accent);
-    border-bottom-color: var(--ttv-accent);
-  }
-  #settings-body {
-    flex: 1;
+  #settings-master .ms-item:hover  { background: var(--ttv-bg-elev2); }
+  #settings-master .ms-item.active { background: var(--ttv-bg-elev2); color: var(--ttv-accent); }
+  #settings-master .ms-item .chev  { color: var(--ttv-muted); margin-left: 8px; flex: none; }
+  #settings-master .ms-item.active .chev { color: var(--ttv-accent); }
+
+  #settings-detail {
+    flex: 1; min-width: 0;
     overflow-y: auto;
     padding: 16px;
     color: var(--ttv-fg);
+    -webkit-overflow-scrolling: touch;
   }
-  #settings-body h3 { margin-top: 0; color: var(--ttv-fg); font-weight: 500; }
-  #settings-body .plugin-card {
+  #settings-detail .empty-detail {
+    color: var(--ttv-muted); padding: 24px 8px;
+    font-size: 13px; text-align: center;
+  }
+
+  @media (max-width: 700px) {
+    /* Narrow: master fills the whole panel by default. When a detail
+       is selected (.show-detail on the overlay), master hides and
+       detail takes over with the back arrow visible. */
+    #settings-content { flex-direction: column; }
+    #settings-master {
+      width: 100%; flex: 1;
+      border-right: none;
+      border-bottom: 1px solid var(--ttv-border);
+    }
+    #settings-detail { display: none; }
+    #settings-overlay.show-detail #settings-master { display: none; }
+    #settings-overlay.show-detail #settings-detail { display: block; flex: 1; }
+    #settings-overlay.show-detail #settings-back   { display: inline-flex; }
+  }
+  /* Body kept for the detail-pane internal styling — same selectors
+     used to live under #settings-body, now under #settings-detail. */
+  #settings-detail h3 { margin-top: 0; color: var(--ttv-fg); font-weight: 500; }
+  #settings-detail .plugin-card {
     background: #252526;
     border: 1px solid #333;
     border-radius: 6px;
@@ -197,11 +235,11 @@
     flex-direction: column;
     gap: 4px;
   }
-  #settings-body .plugin-card .name { font-weight: 600; color: var(--ttv-fg); }
-  #settings-body .plugin-card .meta { color: var(--ttv-muted); font-size: 12px; }
-  #settings-body .plugin-card .desc { color: #b8b8b8; font-size: 13px; line-height: 1.4; margin-top: 4px; }
-  #settings-body .plugin-card .row { display: flex; align-items: center; gap: 8px; }
-  #settings-body .plugin-card .badge {
+  #settings-detail .plugin-card .name { font-weight: 600; color: var(--ttv-fg); }
+  #settings-detail .plugin-card .meta { color: var(--ttv-muted); font-size: 12px; }
+  #settings-detail .plugin-card .desc { color: #b8b8b8; font-size: 13px; line-height: 1.4; margin-top: 4px; }
+  #settings-detail .plugin-card .row { display: flex; align-items: center; gap: 8px; }
+  #settings-detail .plugin-card .badge {
     display: inline-block;
     padding: 2px 8px;
     border-radius: 10px;
@@ -209,12 +247,12 @@
     background: #2d2d2d;
     color: var(--ttv-muted);
   }
-  #settings-body .plugin-card .badge.builtin { background: #1f3a2a; color: var(--ttv-accent); }
-  #settings-body .plugin-card .badge.active   { background: #1f2a3a; color: #6e9ed2; }
-  #settings-body .empty { color: var(--ttv-muted); padding: 16px 0; }
-  #settings-body table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  #settings-body table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid var(--ttv-border); text-align: left; }
-  #settings-body table th { color: var(--ttv-muted); font-weight: 500; }
+  #settings-detail .plugin-card .badge.builtin { background: #1f3a2a; color: var(--ttv-accent); }
+  #settings-detail .plugin-card .badge.active   { background: #1f2a3a; color: #6e9ed2; }
+  #settings-detail .empty { color: var(--ttv-muted); padding: 16px 0; }
+  #settings-detail table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #settings-detail table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid var(--ttv-border); text-align: left; }
+  #settings-detail table th { color: var(--ttv-muted); font-weight: 500; }
 
   #pane-picker-overlay {
     position: fixed; inset: 0;
@@ -556,11 +594,14 @@
 <div id="settings-overlay" role="dialog" aria-label="Settings">
   <div id="settings-panel">
     <div id="settings-header">
-      <span class="title">Settings</span>
+      <button id="settings-back" type="button" aria-label="Back">←</button>
+      <span class="title" id="settings-title">Settings</span>
       <button id="settings-close" type="button" aria-label="Close">×</button>
     </div>
-    <div id="settings-tabs"></div>
-    <div id="settings-body"></div>
+    <div id="settings-content">
+      <div id="settings-master"></div>
+      <div id="settings-detail"></div>
+    </div>
   </div>
 </div>
 
@@ -1592,102 +1633,163 @@ async function setPluginEnabled(id, enabled) {
 
 (function() {
   const $overlay = document.getElementById('settings-overlay');
-  const $tabs    = document.getElementById('settings-tabs');
-  const $body    = document.getElementById('settings-body');
+  const $master  = document.getElementById('settings-master');
+  const $detail  = document.getElementById('settings-detail');
+  const $title   = document.getElementById('settings-title');
   const $btn     = document.getElementById('settings-btn');
   const $close   = document.getElementById('settings-close');
+  const $back    = document.getElementById('settings-back');
 
-  // Persist the active settings tab so reload doesn't bounce the user
-  // back to Plugins. Validated at open-time against the current tab
-  // list — a saved id for an uninstalled plugin tab falls back to
-  // 'plugins' rather than rendering nothing.
+  // Master/detail layout (Obsidian-pattern):
+  //   Wide  (>700px):  master sidebar always visible; clicking an
+  //                    item swaps the right pane.
+  //   Narrow (≤700px): drill-in. Master fills the panel; clicking
+  //                    an item adds .show-detail to the overlay
+  //                    which hides master + reveals detail + back arrow.
+  //
+  // activeTabId persisted across reloads. Empty string = no detail
+  // selected (master view). On wide viewport, an empty selection
+  // shows an empty detail pane (with hint); we auto-select the
+  // saved id at open so wide-mode users land on something.
+
   const TAB_KEY = 'ttv-last-settings-tab';
   let activeTabId = (function() {
-    try { return localStorage.getItem(TAB_KEY) || 'plugins'; }
-    catch { return 'plugins'; }
+    try { return localStorage.getItem(TAB_KEY) || ''; }
+    catch { return ''; }
   })();
 
   function setActiveTabId(id) {
-    activeTabId = id;
-    try { localStorage.setItem(TAB_KEY, id); } catch {}
+    activeTabId = id || '';
+    try {
+      if (activeTabId) localStorage.setItem(TAB_KEY, activeTabId);
+      else             localStorage.removeItem(TAB_KEY);
+    } catch {}
   }
 
+  function isNarrow() { return window.matchMedia('(max-width: 700px)').matches; }
+
   function open() {
-    // Validate saved id against current tab list — plugin-contributed
-    // tabs come and go.
-    const list = tabs();
-    if (!list.find(function(x) { return x.id === activeTabId; })) {
-      setActiveTabId(list[0]?.id || 'plugins');
+    // Validate saved id against current items list — plugins come
+    // and go. Falls back to empty selection.
+    const items = allItems();
+    if (activeTabId && !items.find(function(x) { return x.id === activeTabId; })) {
+      setActiveTabId('');
     }
+    // Wide viewport: pick a sensible default if nothing is selected
+    // so the right pane isn't empty. Narrow viewport: keep saved
+    // selection (drills user back to where they left off) OR shows
+    // master when no selection exists.
+    if (!isNarrow() && !activeTabId) {
+      setActiveTabId(items[0]?.id || '');
+    }
+    if (activeTabId) $overlay.classList.add('show-detail');
+    else             $overlay.classList.remove('show-detail');
     render();
     $overlay.classList.add('open');
   }
   function close() { $overlay.classList.remove('open'); }
+  function backToMaster() {
+    setActiveTabId('');
+    $overlay.classList.remove('show-detail');
+    $title.textContent = 'Settings';
+    render();
+  }
 
   $btn.addEventListener('click', open);
   $close.addEventListener('click', close);
+  $back.addEventListener('click', backToMaster);
   $overlay.addEventListener('click', function(e) {
     if (e.target.id === 'settings-overlay') close();
   });
   document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && $overlay.classList.contains('open')) close();
+    if (e.key === 'Escape' && $overlay.classList.contains('open')) {
+      // Esc on narrow + drill-in = back to master; otherwise close.
+      if (isNarrow() && $overlay.classList.contains('show-detail')) backToMaster();
+      else close();
+    }
   });
 
-  function tabs() {
-    // Built-in tabs first; then any plugin-contributed tabs.
-    const list = [
-      { id: 'plugins',  title: 'Plugins' },
-      { id: 'discover', title: 'Discover' },
-      { id: 'layout',   title: 'Layout' },
-      { id: 'about',    title: 'About' },
-    ];
+  // Sections drive the master list: { title, items: [{id, title, plugin?}] }.
+  // Plugin settings live in their own section so they're visually
+  // separated from the core categories. Empty sections are skipped.
+  function sections() {
     const reg = window.ttyview._internal.registries.settingsTab;
-    for (const def of reg.values()) {
-      list.splice(list.length - 1, 0, { id: def.id, title: def.title, plugin: def });
-    }
-    return list;
+    const pluginItems = Array.from(reg.values()).map(function(def) {
+      return { id: def.id, title: def.title, plugin: def };
+    });
+    return [
+      {
+        title: 'Options',
+        items: [
+          { id: 'plugins',  title: 'Plugins' },
+          { id: 'discover', title: 'Discover' },
+          { id: 'layout',   title: 'Layout' },
+          { id: 'about',    title: 'About' },
+        ],
+      },
+      { title: 'Plugin options', items: pluginItems },
+    ];
+  }
+  function allItems() {
+    const out = [];
+    for (const s of sections()) for (const i of s.items) out.push(i);
+    return out;
+  }
+
+  function selectItem(item) {
+    setActiveTabId(item.id);
+    $overlay.classList.add('show-detail');
+    render();
   }
 
   function render() {
-    $tabs.innerHTML = '';
-    let activeBtn = null;
-    for (const t of tabs()) {
-      const b = document.createElement('button');
-      b.className = 'tab' + (t.id === activeTabId ? ' active' : '');
-      b.textContent = t.title;
-      b.addEventListener('click', function() {
-        setActiveTabId(t.id);
-        render();
-      });
-      $tabs.appendChild(b);
-      if (t.id === activeTabId) activeBtn = b;
+    // ---- master ----
+    $master.innerHTML = '';
+    for (const sec of sections()) {
+      if (!sec.items.length) continue;
+      const h = document.createElement('div');
+      h.className = 'ms-section';
+      h.textContent = sec.title;
+      $master.appendChild(h);
+      for (const item of sec.items) {
+        const row = document.createElement('div');
+        row.className = 'ms-item' + (item.id === activeTabId ? ' active' : '');
+        row.dataset.id = item.id;
+        const label = document.createElement('span');
+        label.textContent = item.title;
+        row.appendChild(label);
+        const chev = document.createElement('span');
+        chev.className = 'chev'; chev.textContent = '›';
+        row.appendChild(chev);
+        row.addEventListener('click', function() { selectItem(item); });
+        $master.appendChild(row);
+      }
     }
-    // Scroll the active tab into view inside the (horizontal-scroll)
-    // tab strip. Without this, programmatic navigation from the
-    // Plugins ⚙ button can land on a tab that's off-screen — the
-    // user gets the right CONTENT but no visual confirmation. Done
-    // via rAF so layout has settled before measuring.
-    if (activeBtn) {
-      requestAnimationFrame(function() {
-        try {
-          activeBtn.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
-        } catch {}
-      });
+    // ---- detail ----
+    $detail.innerHTML = '';
+    const current = activeTabId
+      ? allItems().find(function(x) { return x.id === activeTabId; })
+      : null;
+    if (!current) {
+      // Wide viewport: empty detail pane with a hint. Narrow
+      // viewport: this branch typically isn't visible — master fills
+      // the panel until the user picks something.
+      const hint = document.createElement('div');
+      hint.className = 'empty-detail';
+      hint.textContent = 'Pick a section on the left.';
+      $detail.appendChild(hint);
+      $title.textContent = 'Settings';
+      return;
     }
-    const t = tabs().find(function(x) { return x.id === activeTabId; });
-    $body.innerHTML = '';
-    if (!t) return;
-    if (t.id === 'plugins') {
-      renderPluginsTab($body);
-    } else if (t.id === 'discover') {
-      renderDiscoverTab($body);
-    } else if (t.id === 'layout') {
-      renderLayoutTab($body);
-    } else if (t.id === 'about') {
-      renderAboutTab($body);
-    } else if (t.plugin) {
-      try { t.plugin.render($body); } catch (e) {
-        $body.textContent = 'plugin settings render error: ' + e.message;
+    $title.textContent = current.title;
+    if (current.id === 'plugins')        renderPluginsTab($detail);
+    else if (current.id === 'discover')  renderDiscoverTab($detail);
+    else if (current.id === 'layout')    renderLayoutTab($detail);
+    else if (current.id === 'about')     renderAboutTab($detail);
+    else if (current.plugin) {
+      try { current.plugin.render($detail); }
+      catch (e) {
+        $detail.textContent = 'plugin settings render error: ' + e.message;
       }
     }
   }
@@ -1783,8 +1885,11 @@ async function setPluginEnabled(id, enabled) {
             sbtn.textContent = '⚙ Settings';
             sbtn.title = 'Open this plugin\'s settings tab';
             sbtn.addEventListener('click', function() {
-              setActiveTabId(def.id);
-              render();
+              // Use the same drill-in path as a master-list click so
+              // narrow-viewport users get the back arrow + detail
+              // takeover; wide-viewport users see the active row
+              // highlight on the left.
+              selectItem({ id: def.id });
             });
             actions.appendChild(sbtn);
           }

@@ -104,7 +104,16 @@ describe('window.ttyview plugin API', () => {
     const btn = c.document.getElementById('settings-btn') as any;
     btn.click();
     expect(overlay.className).toContain('open');
-    // Plugins tab should list cell-grid as a terminal view
+    // Master/detail layout: master list shows Options + Plugin options
+    // sections with Plugins / Discover / Layout / About as items.
+    const masterItems = overlay.querySelectorAll('#settings-master .ms-item');
+    // First span is the label, second is the chevron — read the label.
+    const masterTitles = Array.from(masterItems).map((n: any) => n.querySelector('span').textContent);
+    expect(masterTitles).toContain('Plugins');
+    expect(masterTitles).toContain('About');
+    // Drill into Plugins → cards with the registered terminal views appear.
+    const pluginsRow = Array.from(masterItems).find((n: any) => n.querySelector('span').textContent === 'Plugins') as any;
+    pluginsRow.click();
     const cards = overlay.querySelectorAll('.plugin-card .name');
     const names = Array.from(cards).map((n: any) => n.textContent);
     expect(names).toContain('Cell Grid');
