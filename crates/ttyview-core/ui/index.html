@@ -1682,6 +1682,7 @@ async function setPluginEnabled(id, enabled) {
     const reg = window.ttyview._internal.registries;
     const sections = [
       { title: 'Terminal views', map: reg.terminalView },
+      { title: 'Pane pickers',   map: reg.panePickerList },
       { title: 'Tab bars',       map: reg.tabBar },
       { title: 'Header widgets', map: reg.headerWidget },
       { title: 'Input accessories', map: reg.inputAccessory },
@@ -1730,29 +1731,49 @@ async function setPluginEnabled(id, enabled) {
           d.textContent = def.description;
           card.appendChild(d);
         }
-        // Action buttons — themes get Activate/Deactivate, terminal views
-        // get Activate. Other contribution kinds are passive (cards are
-        // informational only).
-        if (sec.title === 'Themes' || sec.title === 'Terminal views') {
+        // Action buttons. Three categories:
+        //   - Themes: Activate / Deactivate
+        //   - Terminal views: Activate
+        //   - Anything with a matching settingsTab: ⚙ Settings (jumps
+        //     to that tab in the same overlay). Skipped on the Settings
+        //     tabs section itself to avoid the trivial self-link.
+        const hasSettingsTab = reg.settingsTab.has(def.id) && sec.title !== 'Settings tabs';
+        const wantsActions = sec.title === 'Themes' || sec.title === 'Terminal views' || hasSettingsTab;
+        if (wantsActions) {
           const actions = document.createElement('div');
-          actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;';
-          const btn = document.createElement('button');
-          btn.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
+          actions.style.cssText = 'margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;';
+          const btnStyle = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);padding:5px 12px;border-radius:4px;cursor:pointer;font-size:12px;';
           if (sec.title === 'Themes') {
+            const btn = document.createElement('button');
+            btn.style.cssText = btnStyle;
             btn.textContent = isActiveTheme ? 'Deactivate' : 'Activate';
             btn.addEventListener('click', function() {
               window.ttyview._internal.setActiveThemeId(isActiveTheme ? null : def.id);
               render();
             });
-          } else {
+            actions.appendChild(btn);
+          } else if (sec.title === 'Terminal views') {
+            const btn = document.createElement('button');
+            btn.style.cssText = btnStyle;
             btn.textContent = isActiveTerm ? 'Active' : 'Activate';
             btn.disabled = isActiveTerm;
             if (!isActiveTerm) btn.addEventListener('click', function() {
               window.ttyview._internal.setActiveTerminalViewId(def.id);
               render();
             });
+            actions.appendChild(btn);
           }
-          actions.appendChild(btn);
+          if (hasSettingsTab) {
+            const sbtn = document.createElement('button');
+            sbtn.style.cssText = btnStyle;
+            sbtn.textContent = '⚙ Settings';
+            sbtn.title = 'Open this plugin\'s settings tab';
+            sbtn.addEventListener('click', function() {
+              setActiveTabId(def.id);
+              render();
+            });
+            actions.appendChild(sbtn);
+          }
           card.appendChild(actions);
         }
         el.appendChild(card);
