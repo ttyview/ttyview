@@ -1597,10 +1597,28 @@ async function setPluginEnabled(id, enabled) {
   const $btn     = document.getElementById('settings-btn');
   const $close   = document.getElementById('settings-close');
 
-  let activeTabId = 'plugins';
+  // Persist the active settings tab so reload doesn't bounce the user
+  // back to Plugins. Validated at open-time against the current tab
+  // list — a saved id for an uninstalled plugin tab falls back to
+  // 'plugins' rather than rendering nothing.
+  const TAB_KEY = 'ttv-last-settings-tab';
+  let activeTabId = (function() {
+    try { return localStorage.getItem(TAB_KEY) || 'plugins'; }
+    catch { return 'plugins'; }
+  })();
+
+  function setActiveTabId(id) {
+    activeTabId = id;
+    try { localStorage.setItem(TAB_KEY, id); } catch {}
+  }
 
   function open() {
-    activeTabId = activeTabId || 'plugins';
+    // Validate saved id against current tab list — plugin-contributed
+    // tabs come and go.
+    const list = tabs();
+    if (!list.find(function(x) { return x.id === activeTabId; })) {
+      setActiveTabId(list[0]?.id || 'plugins');
+    }
     render();
     $overlay.classList.add('open');
   }
@@ -1637,7 +1655,7 @@ async function setPluginEnabled(id, enabled) {
       b.className = 'tab' + (t.id === activeTabId ? ' active' : '');
       b.textContent = t.title;
       b.addEventListener('click', function() {
-        activeTabId = t.id;
+        setActiveTabId(t.id);
         render();
       });
       $tabs.appendChild(b);
