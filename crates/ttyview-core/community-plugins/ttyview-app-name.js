@@ -14,12 +14,16 @@
   tv.contributes.headerWidget({
     id: 'ttyview-app-name',
     name: 'App Name',
+    // Default to its own row above the main header. Reads as a title
+    // bar on mobile. User can move it back into the right side of
+    // the header via Settings → Layout.
+    preferredSlot: 'top-bar',
     render: function(slot) {
       const span = document.createElement('span');
       span.style.cssText =
-        'font-weight:600;color:var(--ttv-accent);font-size:13px;' +
-        'padding:0 6px;white-space:nowrap;overflow:hidden;' +
-        'text-overflow:ellipsis;max-width:160px;';
+        'font-weight:600;color:var(--ttv-accent);font-size:14px;' +
+        'padding:0 4px;white-space:nowrap;overflow:hidden;' +
+        'text-overflow:ellipsis;max-width:100%;flex:1;';
       slot.appendChild(span);
 
       let cancelled = false;

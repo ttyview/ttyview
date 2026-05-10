@@ -328,6 +328,7 @@
      (Settings → Layout) lets the user move widgets between these
      and the header-right slot. Each is hidden until at least one
      plugin contributes; the mounter toggles [hidden]. */
+  [data-slot="top-bar"],
   [data-slot="above-grid"],
   [data-slot="below-grid"],
   [data-slot="above-input"] {
@@ -340,6 +341,9 @@
     scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
   }
+  /* top-bar sits above the main header chrome — slightly taller,
+     bottom-bordered to separate from the header. */
+  [data-slot="top-bar"]      { padding: 6px 12px; border-bottom: 1px solid var(--ttv-border); align-items: center; }
   [data-slot="above-grid"]   { border-bottom: 1px solid var(--ttv-border); }
   [data-slot="below-grid"]   { border-top: 1px solid var(--ttv-border); border-bottom: 1px solid var(--ttv-border); }
   [data-slot="above-input"]  { border-top: 1px solid #333; }
@@ -494,6 +498,11 @@
 </style>
 </head>
 <body>
+<!-- top-bar: highest layout slot. Hidden until a plugin contributes
+     to it. Plugins like ttyview-app-name prefer this slot via the
+     preferredSlot hint in their contribution definition. -->
+<div id="top-bar" data-slot="top-bar" hidden></div>
+
 <header>
   <span class="title">ttyview</span>
   <span class="sep">·</span>
@@ -829,6 +838,7 @@ window.ttyview = (function() {
   // Public list of moveable slots. Order matters for the layout-tab
   // dropdown (top to bottom of the page).
   const SLOTS = [
+    { id: 'top-bar',      name: 'Top bar' },
     { id: 'header-right', name: 'Header (right)' },
     { id: 'above-grid',   name: 'Above grid' },
     { id: 'below-grid',   name: 'Below grid' },
@@ -841,6 +851,7 @@ window.ttyview = (function() {
   };
   const SLOT_KINDS = ['headerWidget', 'tabBar', 'inputAccessory'];
   const SLOT_INNER_CLASS = {
+    'top-bar':      'hw-slot',
     'header-right': 'hw-slot',
     'above-grid':   'tb-slot',
     'below-grid':   'tb-slot',
@@ -877,7 +888,15 @@ window.ttyview = (function() {
     }
   }
   function resolveSlot(def, kind) {
-    return layout[def.id] || KIND_DEFAULT_SLOT[kind] || 'above-grid';
+    // Resolution order:
+    //   1. user-customized layout map (Settings → Layout)
+    //   2. plugin-declared preferredSlot — author hint, used when the
+    //      user hasn't moved it manually
+    //   3. kind default (e.g. headerWidget → header-right)
+    return layout[def.id]
+      || (def && def.preferredSlot)
+      || KIND_DEFAULT_SLOT[kind]
+      || 'above-grid';
   }
   function mountInto(def, kind, slotId) {
     if (mounted.has(def.id)) return;
