@@ -27,6 +27,7 @@ pub struct PaneSummary {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/api/instance", get(get_instance))
         .route("/panes", get(list_panes))
         .route("/panes/:id/grid", get(get_grid))
         .route("/panes/:id/text", get(get_text))
@@ -35,6 +36,29 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/panes/:id/drift", get(get_drift))
         .route("/panes/:id/reseed", post(post_reseed))
         .route("/panes/:id/cc-transcript", get(get_cc_transcript))
+}
+
+#[derive(Debug, Serialize)]
+pub struct InstanceInfo {
+    /// Human-readable instance name, set via the daemon's `--app-name`
+    /// flag. Null when unset (the bare `ttyview-daemon` case).
+    pub name: Option<String>,
+    /// Whether the daemon was started in --demo mode. Plugins might
+    /// surface this differently (e.g. demo banners).
+    pub demo: bool,
+    /// Whether the daemon was started in --read-only mode.
+    pub read_only: bool,
+}
+
+/// Daemon-instance metadata. Used by the bundled ttyview-app-name plugin
+/// to render the app name in the header. Other plugins are welcome to
+/// read it for similar surfacing (e.g. demo / read-only banners).
+async fn get_instance(State(app): State<Arc<AppState>>) -> Json<InstanceInfo> {
+    Json(InstanceInfo {
+        name: app.app_name.clone(),
+        demo: app.demo_mode,
+        read_only: app.read_only,
+    })
 }
 
 async fn list_panes(State(app): State<Arc<AppState>>) -> Json<Vec<PaneSummary>> {

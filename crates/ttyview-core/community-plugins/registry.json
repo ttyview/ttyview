@@ -81,6 +81,15 @@
       "author": "ttyview",
       "kind": "tabBar",
       "source": "ttyview-tabs.js"
+    },
+    {
+      "id": "ttyview-app-name",
+      "name": "App Name",
+      "description": "Renders the daemon instance name (set via the daemon's --app-name flag, populated by ttyview-manager from each app's manifest) in the header. Useful for telling apart multiple ttyview tabs at a glance.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "headerWidget",
+      "source": "ttyview-app-name.js"
     }
   ]
 }

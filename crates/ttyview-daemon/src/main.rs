@@ -89,6 +89,12 @@ struct Cli {
     /// isolated across instances automatically.
     #[arg(long)]
     config_dir: Option<PathBuf>,
+
+    /// Human-readable instance name. Surfaced via `GET /api/instance`
+    /// for plugins (e.g. ttyview-app-name) to render in the header.
+    /// Used by ttyview-manager to label each managed app.
+    #[arg(long)]
+    app_name: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -114,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         demo_mode: cli.demo,
         read_only: cli.read_only || cli.demo,
         config_dir: cli.config_dir.clone(),
+        app_name: cli.app_name.clone(),
     })
     .await
 }

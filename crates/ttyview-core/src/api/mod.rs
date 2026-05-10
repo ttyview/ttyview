@@ -64,6 +64,10 @@ pub struct AppState {
     /// (`<config_dir>/plugins/`) and `installed.json`. Two daemons
     /// with different config_dir values share zero state.
     pub config_dir: std::path::PathBuf,
+    /// Human-readable name for this daemon instance. Returned by
+    /// `GET /api/instance`; plugins (e.g. ttyview-app-name) render
+    /// it in the header.
+    pub app_name: Option<String>,
 }
 
 pub fn router(state: AppState) -> Router {

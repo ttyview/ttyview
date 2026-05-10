@@ -45,6 +45,9 @@ pub struct RunOptions {
     /// Holds installed plugins + their index. Browsers further isolate
     /// per-origin localStorage automatically.
     pub config_dir: Option<std::path::PathBuf>,
+    /// Human-readable name for this daemon instance. Returned by
+    /// `GET /api/instance`; null when unset.
+    pub app_name: Option<String>,
 }
 
 pub async fn run_with_options_v2(opts: RunOptions) -> Result<()> {
@@ -73,6 +76,7 @@ pub async fn run_with_options(
         demo_mode: false,
         read_only: false,
         config_dir: None,
+        app_name: None,
     }).await
 }
 
@@ -80,7 +84,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     let RunOptions {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
-        demo_mode, read_only, config_dir,
+        demo_mode, read_only, config_dir, app_name,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -207,6 +211,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         read_only,
         demo_mode,
         config_dir: resolved_config_dir,
+        app_name: app_name.clone(),
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {
