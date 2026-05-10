@@ -99,6 +99,15 @@
       "author": "ttyview",
       "kind": "panePickerList",
       "source": "ttyview-pane-picker.js"
+    },
+    {
+      "id": "ttyview-display-toggles",
+      "name": "Display Toggles",
+      "description": "Adds a 'Display' settings tab with toggles for built-in chrome — currently the font-control buttons (A− / ↔ / A+) which are hidden by default. Future toggles for other header buttons (scroll-to-bottom, refresh) live here too.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "settingsTab",
+      "source": "ttyview-display-toggles.js"
     }
   ]
 }

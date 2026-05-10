@@ -290,7 +290,12 @@
     pointer-events: none;
   }
   #grid-host { position: relative; }
-  header .font-ctl { display: flex; gap: 2px; }
+  /* Font controls hidden by default — opt-in via the bundled
+     ttyview-display-toggles plugin (Settings → Display → Show font
+     controls). Most users autofit + scrollbottom-only, the A−/↔/A+
+     trio just consumes header space on a phone. */
+  header .font-ctl { display: none; gap: 2px; }
+  body.ttv-show-font-ctl header .font-ctl { display: flex; }
   header .font-ctl button { padding: 4px 6px; min-width: 26px; }
   header .status {
     margin-left: 4px;
