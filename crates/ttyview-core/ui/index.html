@@ -608,6 +608,7 @@ window.ttyview = (function() {
     headerWidget: new Map(),  // id -> def {id, name, render(slot)}
     inputAccessory: new Map(), // id -> def {id, name, render(slot)} — row above the chat input
     tabBar: new Map(),         // id -> def {id, name, render(slot)} — horizontal-scroll row above the grid
+    panePickerList: new Map(), // id -> def {id, name, render(slot, ctx)} — owns the picker list contents
   };
   let activeTerminalViewId = null;
   let activeTerminalViewUnmount = null;  // returned by the plugin's render()
@@ -681,6 +682,11 @@ window.ttyview = (function() {
       return panesCache.find(function(p) { return p.id === activePaneId; }) || null;
     },
     selectPane: function(paneId) { return selectPane(paneId); },
+    // Programmatic open / close of the pane picker overlay. Used by the
+    // ttyview-pane-picker plugin's "switch to recent" affordances and
+    // by tests / commands.
+    openPanePicker:  function() { try { openPanePicker(); }  catch {} },
+    closePanePicker: function() { try { closePanePicker(); } catch {} },
     sendInput: function(paneId, keys) {
       // Forward via WS; daemon routes via t:'input'. Returns boolean
       // so plugins (Quick Keys, etc.) can give visual feedback when
@@ -727,6 +733,7 @@ window.ttyview = (function() {
       headerWidget: makeContributor('headerWidget'),
       inputAccessory: makeContributor('inputAccessory'),
       tabBar:         makeContributor('tabBar'),
+      panePickerList: makeContributor('panePickerList'),
     },
     // === Per-plugin storage (localStorage scoped by plugin id) ===
     storage: pluginStorage,
@@ -961,6 +968,53 @@ window.ttyview = (function() {
   };
 })();
 
+// === Pane-picker-list mounter ===
+// First registered panePickerList plugin owns #pane-picker-list. The
+// plugin is responsible for self-rendering against panesCache /
+// pane-changed events; openPanePicker just shows the overlay.
+//
+// Symmetric to terminalView's "active id" pattern — registering a
+// panePickerList plugin replaces any prior one (rare; usually only
+// the bundled ttyview-pane-picker is installed). If the active
+// plugin is unmounted (uninstalled / disabled), we fall back to the
+// built-in arbitrary-order render the next time the picker opens.
+(function() {
+  const $list = document.getElementById('pane-picker-list');
+  if (!$list) return;
+  let active = null;          // { def, unmount }
+
+  function unmountActive() {
+    if (active && typeof active.unmount === 'function') {
+      try { active.unmount(); }
+      catch (e) { console.error('panePickerList unmount threw', e); }
+    }
+    active = null;
+    $list.innerHTML = '';
+  }
+  function mount(def) {
+    unmountActive();          // single-active model
+    let unmount = null;
+    try {
+      unmount = (typeof def.render === 'function')
+        ? def.render($list, { api: window.ttyview }) || null
+        : null;
+    } catch (e) {
+      console.error('panePickerList render threw for ' + def.id, e);
+    }
+    active = { def, unmount };
+  }
+  // Mount any plugin that registered before this glue ran.
+  for (const def of window.ttyview._internal.registries.panePickerList.values()) {
+    mount(def); break;       // first one wins
+  }
+  window.ttyview.on('panePickerList-registered', function(def) {
+    if (!active) mount(def);
+  });
+  window.ttyview.on('panePickerList-unregistered', function(def) {
+    if (active && active.def.id === def.id) unmountActive();
+  });
+})();
+
 // === Diagnostic logging ===
 // Lightweight client telemetry for debugging. Buffered locally,
 // flushed via WS every 1s OR when the buffer hits 64 events.
@@ -1080,11 +1134,19 @@ function renderPanePickerList() {
 
 function openPanePicker() {
   const t0 = performance.now();
-  renderPanePickerList();
+  // If a panePickerList plugin is mounted, the slot is already populated
+  // and self-managing (re-renders on panes-updated / pane-changed). Skip
+  // the inline render in that case. Otherwise fall back to the built-in
+  // arbitrary-order listing for backwards compat.
+  const hasPlugin = window.ttyview._internal.registries.panePickerList.size > 0;
+  if (!hasPlugin) renderPanePickerList();
   const t1 = performance.now();
   document.getElementById('pane-picker-overlay').classList.add('open');
   document.getElementById('pane-picker-btn').setAttribute('aria-expanded', 'true');
   const t2 = performance.now();
+  // Tell plugins that the picker just opened — useful for re-rendering
+  // recency timestamps as the user interacts with it.
+  try { window.ttyview._internal.emit('panePicker-opened', {}); } catch {}
   // After current frame paints, log when the user could ACTUALLY see it.
   requestAnimationFrame(() => {
     const t3 = performance.now();
@@ -1094,12 +1156,14 @@ function openPanePicker() {
       paint_ms: +(t3 - t2).toFixed(2),
       total_ms: +(t3 - t0).toFixed(2),
       pane_count: panesCache.length,
+      plugin: hasPlugin,
     });
   });
 }
 function closePanePicker() {
   document.getElementById('pane-picker-overlay').classList.remove('open');
   document.getElementById('pane-picker-btn').setAttribute('aria-expanded', 'false');
+  try { window.ttyview._internal.emit('panePicker-closed', {}); } catch {}
 }
 
 async function loadPanes() {

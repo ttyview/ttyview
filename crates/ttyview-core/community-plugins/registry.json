@@ -90,6 +90,15 @@
       "author": "ttyview",
       "kind": "headerWidget",
       "source": "ttyview-app-name.js"
+    },
+    {
+      "id": "ttyview-pane-picker",
+      "name": "Pane Picker",
+      "description": "Replaces the default arbitrary-order pane picker list with a Recent + All sections layout. Recency tracked per-browser (localStorage) by session name so it survives tmux server restarts. Configurable via Settings → Pane Picker — toggle the recent section, set its size (1-20), choose alphabetical or pane-id sort for the all-section.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "panePickerList",
+      "source": "ttyview-pane-picker.js"
     }
   ]
 }
