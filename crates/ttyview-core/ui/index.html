@@ -1650,6 +1650,7 @@ async function setPluginEnabled(id, enabled) {
 
   function render() {
     $tabs.innerHTML = '';
+    let activeBtn = null;
     for (const t of tabs()) {
       const b = document.createElement('button');
       b.className = 'tab' + (t.id === activeTabId ? ' active' : '');
@@ -1659,6 +1660,19 @@ async function setPluginEnabled(id, enabled) {
         render();
       });
       $tabs.appendChild(b);
+      if (t.id === activeTabId) activeBtn = b;
+    }
+    // Scroll the active tab into view inside the (horizontal-scroll)
+    // tab strip. Without this, programmatic navigation from the
+    // Plugins ⚙ button can land on a tab that's off-screen — the
+    // user gets the right CONTENT but no visual confirmation. Done
+    // via rAF so layout has settled before measuring.
+    if (activeBtn) {
+      requestAnimationFrame(function() {
+        try {
+          activeBtn.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
+        } catch {}
+      });
     }
     const t = tabs().find(function(x) { return x.id === activeTabId; });
     $body.innerHTML = '';
