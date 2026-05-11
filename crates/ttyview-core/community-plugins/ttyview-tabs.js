@@ -190,7 +190,11 @@
     const fitMode = max > 0;
     const needsOwnRow = groups.length > 1 || fitMode;
     if (needsOwnRow) {
-      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;flex-basis:100%;';
+      // Width:100% claims the row in the (now-column-flex) parent.
+      // Do NOT set flex-basis:100% — in a column-flex parent that
+      // applies to height and makes us claim the entire slot, which
+      // visibly inflates row heights / inter-row gaps.
+      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
       // When the host slot is a row-flex container (the default for
       // above-input and above-grid), our column-of-tab-rows would
       // either get pushed off horizontally OR stretch the row's
