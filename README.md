@@ -2,6 +2,10 @@
 
 > Mobile-first web terminal viewer for tmux sessions. A thin **plugin platform** built around live tmux pane rendering — designed primarily for driving Claude Code (and other TUI agents) from your phone.
 
+<p align="center">
+  <img src="docs/assets/hero.gif" alt="ttyview rendering a live Claude Code session on a phone — cell-grid view, pinned-tabs row, mic + quick-keys input accessory" width="320">
+</p>
+
 ## Try it
 
 Three live demos, no install needed:
@@ -27,7 +31,7 @@ Every visible part of the UI is a **plugin** — including the cell renderer its
 
 ## Status
 
-**v0.0.x — working platform.** Daemon attaches to all tmux sessions, serves a structured-grid + WebSocket API, and ships a plugin-based browser client.
+**v0.1.x — public release.** Daemon attaches to all tmux sessions, serves a structured-grid + WebSocket API, and ships a plugin-based browser client. See [`CHANGELOG.md`](CHANGELOG.md) for what's in each release.
 
 What works:
 
@@ -50,22 +54,43 @@ What's coming:
 - More built-in CC-on-phone features (push notifications, session reconnect, voice)
 - Plugin SDK package on npm
 
-## Quick start
+## Install
 
-Requires: Rust toolchain, `tmux`, a tmux session running on the same machine.
+Requires: `tmux`, a tmux session running on the same machine.
+
+### Pre-built binary (recommended)
+
+Each tagged release publishes Linux + macOS binaries for `x86_64` and `aarch64`.
+
+1. Pick the asset matching your OS/arch from the [latest release](https://github.com/ttyview/ttyview/releases/latest).
+2. Extract it and move `ttyview` somewhere on your `PATH`:
+
+   ```bash
+   tar -xzf ttyview-*-$(uname -m)-*.tar.gz
+   install -m 0755 ttyview ~/.local/bin/
+   ```
+
+3. Start the daemon: `ttyview --bind 127.0.0.1:7681` and open the URL in your browser.
+
+A one-line installer (`curl … | sh`) is coming in v0.2.
+
+### From source
+
+Requires the Rust toolchain.
 
 ```bash
 git clone https://github.com/ttyview/ttyview
 cd ttyview
 cargo build --release
 ./target/release/ttyview --bind 127.0.0.1:7681
-# Open http://127.0.0.1:7681 in your browser.
 ```
 
-For phone access, expose the port via Tailscale serve or any HTTPS reverse proxy. Or pass TLS cert/key directly:
+### Phone access
+
+Expose the port via Tailscale serve or any HTTPS reverse proxy. Or pass TLS cert/key directly:
 
 ```bash
-./target/release/ttyview \
+ttyview \
   --bind 0.0.0.0:7681 \
   --tls-cert ~/.config/ttyview/tls.crt \
   --tls-key  ~/.config/ttyview/tls.key
