@@ -111,12 +111,19 @@
         scrollbar-width: none;
       }
       .ttvtab-row::-webkit-scrollbar { display: none; }
-      /* Fit mode: when maxPerRow is set, each row distributes its
-         tabs equally with no horizontal overflow. Labels truncate
-         with middle-ellipsis (applied by JS after layout). */
-      .ttvtab-row.fit { overflow-x: hidden; }
-      .ttvtab-row.fit .ttvtab { flex: 1 1 0; padding-left: 8px; padding-right: 8px; }
-      .ttvtab.fit { flex: 1 1 0; padding-left: 8px; padding-right: 8px; }
+      /* Fit mode: when maxPerRow is set, every tab is exactly
+         1/maxPerRow of the row width — even on rows with fewer
+         items, so columns line up across rows. The row container
+         carries --ttv-max-per-row (set inline by render()).
+         Labels truncate with middle-ellipsis (applied by JS
+         after layout). */
+      .ttvtab-row.fit { overflow-x: hidden; justify-content: flex-start; }
+      .ttvtab-row.fit .ttvtab,
+      .ttvtab.fit {
+        flex: 0 0 calc((100% - (var(--ttv-max-per-row) - 1) * 4px) / var(--ttv-max-per-row));
+        padding-left: 8px;
+        padding-right: 8px;
+      }
     `;
     document.head.appendChild(st);
   }
@@ -170,6 +177,7 @@
         ? Object.assign(document.createElement('div'), { className: 'ttvtab-row' + (fitMode ? ' fit' : '') })
         : mountedSlot;
       if (rowEl !== mountedSlot) mountedSlot.appendChild(rowEl);
+      if (fitMode) rowEl.style.setProperty('--ttv-max-per-row', String(max));
       for (const item of group) {
         if (item.kind === 'pin') {
           const resolved = resolvePin(item.pin, panes);
