@@ -79,6 +79,29 @@ const logs = await page.evaluate(() => {
 });
 console.log('[logs]', JSON.stringify(logs, null, 2));
 
+// (5b) Combined view: select "All agents" and verify entries from
+// multiple agents are interleaved chronologically (descending).
+const combined = await page.evaluate(() => {
+  const sel = document.getElementById('agent-select');
+  sel.value = '__all__';
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  const box = document.getElementById('agent-box');
+  const headings = Array.from(box.querySelectorAll('h4')).map(h => h.textContent.trim());
+  // Check that at least one heading mentions an agent name in brackets.
+  const hasAgentTags = headings.some(h => /\[\w+\]/.test(h));
+  // Headings are now `[agent] YYYY-MM-DD HH:MM — …`.
+  const dates = headings.map(h => h.match(/(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)/)?.[1] || '').filter(Boolean);
+  const sortedDesc = dates.every((d, i) => i === 0 || d <= dates[i - 1]);
+  return {
+    headingCount: headings.length,
+    firstHeading: headings[0],
+    hasAgentTags,
+    sortedDesc,
+    countLabel: document.getElementById('agent-count').textContent,
+  };
+});
+console.log('[combined]', JSON.stringify(combined, null, 2));
+
 // (6) Switch agent: pick the second agent and verify the box changes.
 const secondAgentInfo = await page.evaluate(() => {
   const sel = document.getElementById('agent-select');
@@ -98,6 +121,8 @@ console.log('[ok] Apps URLs filled:', apps.visible && apps.liveAppCount === 4 &&
 console.log('[ok] Paths shows path-rows + GitHub links:', paths.visible && paths.pathRowCount >= 8 && paths.hasGithubLinks >= 2);
 console.log('[ok] Logs has agent dropdown w/ at least 1 entry:', logs.visible && logs.agentOptions.length >= 1 && logs.boxTextLen > 50);
 console.log('[ok] Agent switch refreshes the box:', !secondAgentInfo || secondAgentInfo.changed);
+console.log('[ok] All-agents combined view renders + sorts desc:',
+  combined.headingCount >= 5 && combined.hasAgentTags && combined.sortedDesc);
 
 await page.screenshot({ path: path.join(OUT, '04-logs.png'), fullPage: true });
 console.log('[shot] done:', OUT);
