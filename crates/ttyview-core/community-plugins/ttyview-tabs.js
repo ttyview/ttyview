@@ -30,17 +30,22 @@
   let editingId = null;
   let mountedSlot = null;       // set by tabBar render(); null when not mounted
   let mountedSlotInitial = '';  // restore-on-unmount cssText
-  let parentInitialFlexDir = ''; // restore-on-unmount parent flex-direction
-  let parentInitialAlignItems = '';
-  let parentTouched = false;     // whether we've modified the parent
+  let parentTouched = false;    // whether we've added .ttv-stacked-slot to parent
 
   function savePins()      { storage.set(STORAGE_KEY,    pins);     }
   function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
 
   function resolvePin(pin, panes) {
+    // pin.id is a fast-path *hint* — but tmux recycles pane ids
+    // across server restarts. If the cached id now belongs to a
+    // different session, IGNORE it and re-resolve by session name
+    // (then update the cache). Without this guard, the "active"
+    // highlight tracks a stale id and lights up the wrong tab.
     if (pin.id) {
       const byId = panes.find(p => p.id === pin.id);
-      if (byId) return byId;
+      if (byId && (!pin.session || byId.session === pin.session)) {
+        return byId;
+      }
     }
     if (pin.session) {
       const bySess = panes.find(p => p.session === pin.session);
@@ -114,6 +119,21 @@
         scrollbar-width: none;
       }
       .ttvtab-row::-webkit-scrollbar { display: none; }
+      /* When the tabs plugin claims its parent slot for its own
+         stacked rows, mark the parent so siblings (other plugin
+         spans) get their own horizontal scroll instead of dragging
+         everything together via the slot's overflow-x: auto. */
+      .ttv-stacked-slot {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        overflow-x: hidden !important;
+      }
+      .ttv-stacked-slot > * {
+        overflow-x: auto;
+        max-width: 100%;
+        scrollbar-width: none;
+      }
+      .ttv-stacked-slot > *::-webkit-scrollbar { display: none; }
       /* Fit mode: when maxPerRow is set, every tab is exactly
          1/maxPerRow of the row width — even on rows with fewer
          items, so columns line up across rows. The row container
@@ -175,24 +195,20 @@
       // above-input and above-grid), our column-of-tab-rows would
       // either get pushed off horizontally OR stretch the row's
       // height — visible as "tabs vanished + sibling buttons very
-      // tall". Flip the parent to column so siblings (e.g. quickkeys
-      // sharing above-input) naturally stack below us instead.
+      // tall". Apply .ttv-stacked-slot to the parent: flips it to
+      // column, kills its own overflow-x so the keys-row scroll
+      // doesn't drag the tabs along, and gives each child its own
+      // independent horizontal scroll.
       const parent = mountedSlot.parentNode;
-      if (parent && !parentTouched) {
-        parentInitialFlexDir = parent.style.flexDirection;
-        parentInitialAlignItems = parent.style.alignItems;
-        parentTouched = true;
-      }
       if (parent) {
-        parent.style.flexDirection = 'column';
-        parent.style.alignItems = 'stretch';
+        parent.classList.add('ttv-stacked-slot');
+        parentTouched = true;
       }
     } else {
       mountedSlot.style.cssText = mountedSlotInitial;
       const parent = mountedSlot.parentNode;
       if (parent && parentTouched) {
-        parent.style.flexDirection = parentInitialFlexDir;
-        parent.style.alignItems = parentInitialAlignItems;
+        parent.classList.remove('ttv-stacked-slot');
         parentTouched = false;
       }
     }
@@ -360,8 +376,7 @@
       return function unmount() {
         off1(); off2();
         if (mountedSlot && parentTouched && mountedSlot.parentNode) {
-          mountedSlot.parentNode.style.flexDirection = parentInitialFlexDir;
-          mountedSlot.parentNode.style.alignItems = parentInitialAlignItems;
+          mountedSlot.parentNode.classList.remove('ttv-stacked-slot');
         }
         parentTouched = false;
         mountedSlot = null;
