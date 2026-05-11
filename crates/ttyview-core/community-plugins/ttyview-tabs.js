@@ -30,6 +30,9 @@
   let editingId = null;
   let mountedSlot = null;       // set by tabBar render(); null when not mounted
   let mountedSlotInitial = '';  // restore-on-unmount cssText
+  let parentInitialFlexDir = ''; // restore-on-unmount parent flex-direction
+  let parentInitialAlignItems = '';
+  let parentTouched = false;     // whether we've modified the parent
 
   function savePins()      { storage.set(STORAGE_KEY,    pins);     }
   function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
@@ -165,10 +168,33 @@
     // width. Without fit mode, single-row uses the original inline
     // flex on the slot; multi-row stacks.
     const fitMode = max > 0;
-    if (groups.length > 1 || fitMode) {
-      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
+    const needsOwnRow = groups.length > 1 || fitMode;
+    if (needsOwnRow) {
+      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;flex-basis:100%;';
+      // When the host slot is a row-flex container (the default for
+      // above-input and above-grid), our column-of-tab-rows would
+      // either get pushed off horizontally OR stretch the row's
+      // height — visible as "tabs vanished + sibling buttons very
+      // tall". Flip the parent to column so siblings (e.g. quickkeys
+      // sharing above-input) naturally stack below us instead.
+      const parent = mountedSlot.parentNode;
+      if (parent && !parentTouched) {
+        parentInitialFlexDir = parent.style.flexDirection;
+        parentInitialAlignItems = parent.style.alignItems;
+        parentTouched = true;
+      }
+      if (parent) {
+        parent.style.flexDirection = 'column';
+        parent.style.alignItems = 'stretch';
+      }
     } else {
       mountedSlot.style.cssText = mountedSlotInitial;
+      const parent = mountedSlot.parentNode;
+      if (parent && parentTouched) {
+        parent.style.flexDirection = parentInitialFlexDir;
+        parent.style.alignItems = parentInitialAlignItems;
+        parentTouched = false;
+      }
     }
 
     const placedTabs = []; // { el, label, fullText } — for ellipsis pass
@@ -333,6 +359,11 @@
       render();
       return function unmount() {
         off1(); off2();
+        if (mountedSlot && parentTouched && mountedSlot.parentNode) {
+          mountedSlot.parentNode.style.flexDirection = parentInitialFlexDir;
+          mountedSlot.parentNode.style.alignItems = parentInitialAlignItems;
+        }
+        parentTouched = false;
         mountedSlot = null;
       };
     },
