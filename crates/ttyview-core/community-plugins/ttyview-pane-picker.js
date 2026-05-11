@@ -76,7 +76,12 @@
     if (!opts || !opts.suppressMeta) {
       const meta = document.createElement('span');
       meta.className = 'pp-meta';
-      const parts = [p.id];
+      // Display the pane id with a `p` prefix instead of tmux's
+      // raw `%` — easier to read on mobile and avoids the visual
+      // confusion with "percent". The underlying `p.id` (still %N)
+      // is unchanged; only the rendered string differs.
+      const displayId = String(p.id || '').replace(/^%/, 'p');
+      const parts = [displayId];
       if (p.window != null) parts.push('w' + p.window);
       parts.push(p.cols + '×' + p.rows);
       meta.textContent = parts.join(' · ');
