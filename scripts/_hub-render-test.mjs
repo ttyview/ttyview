@@ -88,7 +88,7 @@ const combined = await page.evaluate(() => {
   const box = document.getElementById('agent-box');
   const headings = Array.from(box.querySelectorAll('h4')).map(h => h.textContent.trim());
   // Check that at least one heading mentions an agent name in brackets.
-  const hasAgentTags = headings.some(h => /\[\w+\]/.test(h));
+  const hasAgentTags = headings.some(h => /\[[\w-]+\]/.test(h));
   // Headings are now `[agent] YYYY-MM-DD HH:MM — …`.
   const dates = headings.map(h => h.match(/(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)/)?.[1] || '').filter(Boolean);
   const sortedDesc = dates.every((d, i) => i === 0 || d <= dates[i - 1]);
