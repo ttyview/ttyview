@@ -20,7 +20,12 @@
   const STORAGE = tv.storage('ttyview-pane-picker');
   const KEY_SETTINGS = 'settings';
   const KEY_RECENCY  = 'recency';
-  const DEFAULTS = { showRecent: true, recentCount: 5, allSort: 'alpha' };
+  // alwaysShowMeta = true forces the per-row meta (id · window · dims)
+  // to render even when every session has a single pane in w0 — i.e.
+  // when the column is redundant noise across all rows. Default false
+  // means we auto-hide it under that condition; user can flip it on
+  // for the verbose view.
+  const DEFAULTS = { showRecent: true, recentCount: 5, allSort: 'alpha', alwaysShowMeta: false };
 
   function loadSettings() {
     return Object.assign({}, DEFAULTS, STORAGE.get(KEY_SETTINGS) || {});
@@ -49,7 +54,7 @@
   }
 
   // === Renderers ===
-  function renderRow(p, panes) {
+  function renderRow(p, panes, opts) {
     // Same disambiguation rule as core's paneLabel: only suffix when
     // multiple panes share a session.
     const same = panes.filter(x => x.session === p.session);
@@ -63,14 +68,20 @@
     const sess = document.createElement('span');
     sess.className = 'pp-session';
     sess.textContent = same.length > 1 ? p.session + ' (' + (idx + 1) + ')' : p.session;
-    const meta = document.createElement('span');
-    meta.className = 'pp-meta';
-    const parts = [p.id];
-    if (p.window != null) parts.push('w' + p.window);
-    parts.push(p.cols + '×' + p.rows);
-    meta.textContent = parts.join(' · ');
     item.appendChild(sess);
-    item.appendChild(meta);
+    // Suppress the meta column when every session in the picker is a
+    // single pane in w0 — the column is the same `· w0 · 60×28` on
+    // every row, just visual noise. User can opt back into the verbose
+    // view via Settings → Pane Picker → Always show meta.
+    if (!opts || !opts.suppressMeta) {
+      const meta = document.createElement('span');
+      meta.className = 'pp-meta';
+      const parts = [p.id];
+      if (p.window != null) parts.push('w' + p.window);
+      parts.push(p.cols + '×' + p.rows);
+      meta.textContent = parts.join(' · ');
+      item.appendChild(meta);
+    }
     item.addEventListener('click', function() {
       tv.closePanePicker();
       // Don't bump recency here — the upcoming pane-changed event
@@ -123,13 +134,24 @@
       return na - nb;
     });
 
+    // "Suppress meta" condition: every session has exactly one pane,
+    // and every pane is in window 0. If both hold, the meta column is
+    // identical noise — auto-hide unless the user forced
+    // alwaysShowMeta. Computed once per render and passed to renderRow
+    // so Recent + All sections stay consistent.
+    const sessionCounts = panes.reduce((m, p) => (m[p.session] = (m[p.session] || 0) + 1, m), {});
+    const allSinglePane = Object.values(sessionCounts).every(n => n === 1);
+    const allWindow0    = panes.every(p => p.window == null || p.window === 0 || p.window === '0');
+    const suppressMeta  = !settings.alwaysShowMeta && allSinglePane && allWindow0;
+    const rowOpts = { suppressMeta };
+
     pickerSlot.innerHTML = '';
     if (settings.showRecent && withTs.length > 0) {
       pickerSlot.appendChild(renderHeader('Recent'));
-      for (const { p } of withTs) pickerSlot.appendChild(renderRow(p, panes));
+      for (const { p } of withTs) pickerSlot.appendChild(renderRow(p, panes, rowOpts));
     }
     pickerSlot.appendChild(renderHeader('All'));
-    for (const p of all) pickerSlot.appendChild(renderRow(p, panes));
+    for (const p of all) pickerSlot.appendChild(renderRow(p, panes, rowOpts));
   }
 
   // === Section header CSS — inject once. Picker rows already styled
@@ -232,6 +254,30 @@
       });
       rowCount.appendChild(num);
       container.appendChild(rowCount);
+
+      // "Always show meta" toggle — opt back into the verbose view
+      // that always shows the `· id · wN · cols×rows` column. Default
+      // off, so the meta column auto-collapses when every session is
+      // a single pane in w0.
+      const rowMeta = makeRow('Meta column');
+      const metaCb = document.createElement('input');
+      metaCb.type = 'checkbox'; metaCb.checked = !!settings.alwaysShowMeta;
+      metaCb.style.cssText = 'margin-right:8px;';
+      metaCb.addEventListener('change', function() {
+        settings.alwaysShowMeta = metaCb.checked;
+        saveSettings(settings);
+        rerender();
+      });
+      const metaLbl = document.createElement('label');
+      metaLbl.style.cssText = 'display:inline-flex;align-items:center;color:var(--ttv-fg);font-size:14px;cursor:pointer;';
+      metaLbl.appendChild(metaCb);
+      metaLbl.appendChild(document.createTextNode('Always show pane id · window · size'));
+      rowMeta.appendChild(metaLbl);
+      const metaHint = document.createElement('div');
+      metaHint.style.cssText = 'color:var(--ttv-muted);font-size:11px;margin-top:6px;';
+      metaHint.textContent = 'Off (default): hide the meta column when every session has one pane in w0 — the column would just be identical text on every row.';
+      rowMeta.appendChild(metaHint);
+      container.appendChild(rowMeta);
 
       // "All sort" dropdown
       const rowSort = makeRow('All-section sort');
