@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// Smoke test for the new ttyview project-hub page hosted under
-// tmux-web. Loads the page, waits for STATUS.md to render, and
-// inventories the headings + pill counts to verify the inline
-// markdown render is doing its job.
+// Smoke test for the tabbed ttyview project-hub page hosted under
+// tmux-web. Loads the page, verifies each of the 4 tabs renders its
+// expected content (status board, live-app URLs, source/paths,
+// per-agent dropdown + log).
 import { chromium } from '@playwright/test';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -20,36 +20,85 @@ const ctx = await browser.newContext({
 const page = await ctx.newPage();
 page.on('pageerror', e => console.log('[page-err]', e.message.slice(0, 200)));
 
-console.log('[goto]', URL);
 await page.goto(URL, { waitUntil: 'networkidle' });
-await page.waitForTimeout(600);
+await page.waitForTimeout(700);
 
-const inv = await page.evaluate(() => {
+// (1) Tabs render.
+const tabs = await page.evaluate(() => Array.from(document.querySelectorAll('.tab-btn'))
+  .map(b => ({ tab: b.dataset.tab, label: b.textContent.trim(), active: b.classList.contains('active') })));
+console.log('[tabs]', JSON.stringify(tabs));
+
+// (2) Overview tab default — status board rendered.
+const overview = await page.evaluate(() => {
   const box = document.getElementById('status-box');
-  if (!box) return { error: 'no #status-box' };
   return {
-    box_exists: true,
-    box_text_len: box.textContent.length,
-    headings: Array.from(box.querySelectorAll('h2,h3,h4')).map(h => h.tagName + ': ' + h.textContent.trim().slice(0, 60)),
-    pill_count: box.querySelectorAll('.pill').length,
-    link_count: box.querySelectorAll('a').length,
-    ul_li_count: box.querySelectorAll('ul li').length,
-    sample_first_li: box.querySelector('ul li')?.textContent?.trim().slice(0, 80),
-    has_load_error: /Could not load/.test(box.textContent),
-    live_app_count: document.querySelectorAll('a.link[data-port]').length,
-    apps_with_hostname: Array.from(document.querySelectorAll('a.link[data-port]'))
-      .filter(a => a.href.includes('127.0.0.1') || a.href.includes(location.hostname))
-      .length,
+    visible: document.querySelector('.tab-panel[data-tab="overview"]').classList.contains('active'),
+    textLen: box?.textContent.length,
+    headingCount: box?.querySelectorAll('h2,h3,h4').length,
+    pillCount: box?.querySelectorAll('.pill').length,
   };
 });
-console.log('[inv]', JSON.stringify(inv, null, 2));
-console.log('--- assertions ---');
-console.log('[ok] hub page reachable:', !!inv.box_exists);
-console.log('[ok] STATUS.md rendered:', inv.box_text_len > 200 && !inv.has_load_error);
-console.log('[ok] headings parsed:', inv.headings.length >= 3);
-console.log('[ok] bullets rendered:', inv.ul_li_count >= 5);
-console.log('[ok] live-app URLs filled:', inv.live_app_count === inv.apps_with_hostname);
+console.log('[overview]', JSON.stringify(overview));
 
-await page.screenshot({ path: path.join(OUT, '01-hub.png'), fullPage: true });
+// (3) Apps tab — switch + check URLs filled.
+await page.click('.tab-btn[data-tab="apps"]');
+await page.waitForTimeout(120);
+const apps = await page.evaluate(() => ({
+  visible: document.querySelector('.tab-panel[data-tab="apps"]').classList.contains('active'),
+  liveAppCount: document.querySelectorAll('.tab-panel[data-tab="apps"] a.link[data-port]').length,
+  allFilled: Array.from(document.querySelectorAll('.tab-panel[data-tab="apps"] a.link[data-port]'))
+    .every(a => a.href !== window.location.href + '#' && a.textContent.length > 0),
+}));
+console.log('[apps]', JSON.stringify(apps));
+
+// (4) Paths tab — has the path-row entries.
+await page.click('.tab-btn[data-tab="paths"]');
+await page.waitForTimeout(120);
+const paths = await page.evaluate(() => ({
+  visible: document.querySelector('.tab-panel[data-tab="paths"]').classList.contains('active'),
+  pathRowCount: document.querySelectorAll('.tab-panel[data-tab="paths"] .path-row').length,
+  hasGithubLinks: document.querySelectorAll('.tab-panel[data-tab="paths"] a[href*="github.com"]').length,
+}));
+console.log('[paths]', JSON.stringify(paths));
+
+// (5) Logs tab — agent dropdown populated, content visible.
+await page.click('.tab-btn[data-tab="logs"]');
+await page.waitForTimeout(700); // give AGENTS.md fetch time
+const logs = await page.evaluate(() => {
+  const sel = document.getElementById('agent-select');
+  const box = document.getElementById('agent-box');
+  const cnt = document.getElementById('agent-count');
+  return {
+    visible: document.querySelector('.tab-panel[data-tab="logs"]').classList.contains('active'),
+    agentOptions: Array.from(sel.options).map(o => o.value),
+    selectedAgent: sel.value,
+    entryPillText: cnt.textContent,
+    boxHeadings: Array.from(box.querySelectorAll('h2,h3,h4')).map(h => h.tagName + ': ' + h.textContent.slice(0, 50)),
+    boxTextLen: box.textContent.length,
+  };
+});
+console.log('[logs]', JSON.stringify(logs, null, 2));
+
+// (6) Switch agent: pick the second agent and verify the box changes.
+const secondAgentInfo = await page.evaluate(() => {
+  const sel = document.getElementById('agent-select');
+  if (sel.options.length < 2) return null;
+  const before = document.getElementById('agent-box').textContent;
+  sel.value = sel.options[1].value;
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  const after = document.getElementById('agent-box').textContent;
+  return { changed: before !== after, newAgent: sel.value };
+});
+console.log('[agent-switch]', JSON.stringify(secondAgentInfo));
+
+console.log('--- assertions ---');
+console.log('[ok] 4 tabs present:', tabs.length === 4);
+console.log('[ok] Overview active by default, STATUS.md rendered:', overview.visible && overview.textLen > 200 && overview.headingCount >= 3);
+console.log('[ok] Apps URLs filled:', apps.visible && apps.liveAppCount === 4 && apps.allFilled);
+console.log('[ok] Paths shows path-rows + GitHub links:', paths.visible && paths.pathRowCount >= 8 && paths.hasGithubLinks >= 2);
+console.log('[ok] Logs has agent dropdown w/ at least 1 entry:', logs.visible && logs.agentOptions.length >= 1 && logs.boxTextLen > 50);
+console.log('[ok] Agent switch refreshes the box:', !secondAgentInfo || secondAgentInfo.changed);
+
+await page.screenshot({ path: path.join(OUT, '04-logs.png'), fullPage: true });
 console.log('[shot] done:', OUT);
 await browser.close();
