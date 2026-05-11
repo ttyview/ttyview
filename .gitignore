@@ -17,3 +17,11 @@ tests/e2e/playwright-report/
 CLAUDE.md
 .claude/
 eval-results/
+
+# Agent coordination files — read live from disk by the ttyview hub
+# page; not for upstream consumption. Kept local. (AGENT_LOG.md was
+# renamed from AGENTS.md to avoid clashing with the well-known
+# AGENTS.md convention used by other agent frameworks for instruction
+# files — same name, different purpose, too confusing.)
+STATUS.md
+AGENT_LOG.md

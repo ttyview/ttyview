@@ -63,7 +63,7 @@ console.log('[paths]', JSON.stringify(paths));
 
 // (5) Logs tab — agent dropdown populated, content visible.
 await page.click('.tab-btn[data-tab="logs"]');
-await page.waitForTimeout(700); // give AGENTS.md fetch time
+await page.waitForTimeout(700); // give AGENT_LOG.md fetch time
 const logs = await page.evaluate(() => {
   const sel = document.getElementById('agent-select');
   const box = document.getElementById('agent-box');
