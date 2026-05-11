@@ -101,6 +101,24 @@
       "source": "ttyview-pane-picker.js"
     },
     {
+      "id": "ttyview-image-paste",
+      "name": "Image Paste",
+      "description": "Pastes / drops / picks images into the chat input. Uploads them to the daemon, then on Send hands ids + caption to /api/uploads/send so the host pastes `<text> [image: /abs/path]` into the tmux pane — the missing piece for Claude Code over SSH. 📷 button in the input accessory row works on mobile (gallery / camera picker); Cmd-V and drag-drop work on desktop.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "inputAccessory",
+      "source": "ttyview-image-paste.js"
+    },
+    {
+      "id": "ttyview-voice-dictation",
+      "name": "Voice Dictation",
+      "description": "🎤 button in the keys row that transcribes speech into the Message box via the browser's Web Speech API. Continuous mode — each finished phrase appends with a trailing space; optionally say 'enter' at the end of a phrase to submit. Settings: language + say-enter toggle. Needs microphone permission per site.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "inputAccessory",
+      "source": "ttyview-voice-dictation.js"
+    },
+    {
       "id": "ttyview-display-toggles",
       "name": "Display Toggles",
       "description": "Adds a 'Display' settings tab with toggles for built-in chrome — currently the font-control buttons (A− / ↔ / A+) which are hidden by default. Future toggles for other header buttons (scroll-to-bottom, refresh) live here too.",
