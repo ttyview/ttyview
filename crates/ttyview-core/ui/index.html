@@ -2460,12 +2460,20 @@ window.ttyview.contributes.terminalView({
       return row;
     }
 
+    // Cursor row tracked from screen.cursor.row on every grid-loaded.
+    // Used by the tap-prompt-to-focus handler to decide if a tap
+    // landed on CC's prompt area (cursor row ± 1).
+    let cursorRowIdx = -1;
+
     // === Render handlers ===
     function buildGrid(screen) {
       $empty.style.display = 'none';
       $sbHost.innerHTML = '';
       $primaryHost.innerHTML = '';
       cells = new Map();
+      if (screen && screen.cursor && typeof screen.cursor.row === 'number') {
+        cursorRowIdx = screen.cursor.row;
+      }
       // Frozen scrollback rows are immutable once written. CC's primary-buffer
       // render-leak can rewrite them upstream — by keeping them OUT of the
       // cell map, our DOM ignores those writes (only primary cells are in
@@ -2543,6 +2551,49 @@ window.ttyview.contributes.terminalView({
       $sbHost.appendChild(frag);
       if (wasAtBottom) host.scrollTop = host.scrollHeight;
     }
+
+    // === Tap-prompt-to-focus: short tap on CC's prompt row focuses
+    // the bottom input. Hold > 350 ms OR drag > 10 px is treated as
+    // a long-press/selection gesture and ignored, so tap-to-select
+    // still works. Gated on body.ttv-tap-prompt-focus (toggle in
+    // Settings → Display, default on).
+    let pressTs = 0, pressX = 0, pressY = 0;
+    $primaryHost.addEventListener('pointerdown', function(e) {
+      pressTs = Date.now(); pressX = e.clientX; pressY = e.clientY;
+    }, { passive: true });
+    $primaryHost.addEventListener('pointerup', function(e) {
+      if (!document.body.classList.contains('ttv-tap-prompt-focus')) return;
+      const heldMs = Date.now() - pressTs;
+      const moved  = Math.hypot(e.clientX - pressX, e.clientY - pressY);
+      if (heldMs > 350 || moved > 10) return;
+      const rowEl = e.target.closest && e.target.closest('.ttv-row');
+      if (!rowEl || rowEl.parentNode !== $primaryHost) return;
+      const rowIdx = Array.prototype.indexOf.call($primaryHost.children, rowEl);
+      if (rowIdx < 0 || cursorRowIdx < 0) return;
+      if (Math.abs(rowIdx - cursorRowIdx) > 1) return;
+      const input = document.getElementById('input-text');
+      if (!input) return;
+      // Suppress the synthetic mousedown/click that would otherwise
+      // run after this pointerup — those events focus the tapped
+      // span (or fall back to body), instantly blurring the input
+      // we just focused. preventDefault on pointerup cancels them.
+      e.preventDefault();
+      input.focus();
+    });
+    // Also kill the click that some browsers still synthesize. Same
+    // rationale as above — without this, a click on the row right
+    // after our pointerup re-blurs the input on real touch devices.
+    $primaryHost.addEventListener('click', function(e) {
+      if (!document.body.classList.contains('ttv-tap-prompt-focus')) return;
+      const rowEl = e.target.closest && e.target.closest('.ttv-row');
+      if (!rowEl || rowEl.parentNode !== $primaryHost) return;
+      const rowIdx = Array.prototype.indexOf.call($primaryHost.children, rowEl);
+      if (rowIdx < 0 || cursorRowIdx < 0) return;
+      if (Math.abs(rowIdx - cursorRowIdx) > 1) return;
+      e.preventDefault();
+      const input = document.getElementById('input-text');
+      if (input && document.activeElement !== input) input.focus();
+    });
 
     // === Subscribe to platform events ===
     const offGrid = ctx.api.on('grid-loaded', function(d) { buildGrid(d.screen); });

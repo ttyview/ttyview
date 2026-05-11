@@ -24,6 +24,13 @@
       defaultOn: false,
       hint:      'Compact header without these on mobile; auto-fit usually does the right thing.',
     },
+    {
+      key:       'tapPromptFocus',
+      label:     'Tap CC prompt to focus input',
+      bodyClass: 'ttv-tap-prompt-focus',
+      defaultOn: true,
+      hint:      'Short tap on the row where the cursor sits (CC’s prompt area, ±1 row) focuses the bottom Message box. Long-press still selects text.',
+    },
   ];
 
   function isOn(t) {
