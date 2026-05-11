@@ -2,8 +2,8 @@ FROM rust:1-slim-bookworm AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --bin ttyview-daemon --bin ttyview-sandbox
+RUN cargo build --release --bin ttyview --bin ttyview-sandbox
 
 FROM scratch
-COPY --from=builder /src/target/release/ttyview-daemon /ttyview-daemon
+COPY --from=builder /src/target/release/ttyview /ttyview
 COPY --from=builder /src/target/release/ttyview-sandbox /ttyview-sandbox

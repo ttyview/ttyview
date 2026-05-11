@@ -1,18 +1,18 @@
-# Multi-stage build for ttyview-daemon. Demo + read-only deployments
+# Multi-stage build for ttyview. Demo + read-only deployments
 # don't need tmux at runtime; the binary embeds everything (UI bundle,
 # community plugins, demo transcript) via rust-embed.
 #
 # Build:
-#   docker build -t ttyview-daemon .
+#   docker build -t ttyview .
 #
 # Run (Tier 1 demo, no tmux):
-#   docker run --rm -p 8080:8080 ttyview-daemon \
+#   docker run --rm -p 8080:8080 ttyview \
 #     --bind 0.0.0.0:8080 --demo
 #
 # Run (Tier 2 read-only, sharing the host's tmux server):
 #   docker run --rm --network host \
 #     -v /tmp/tmux-1000:/tmp/tmux-1000 \
-#     ttyview-daemon --bind 0.0.0.0:8080 --read-only
+#     ttyview --bind 0.0.0.0:8080 --read-only
 
 # ---------------- builder ----------------
 FROM rust:1-slim-bookworm AS builder
@@ -21,7 +21,7 @@ WORKDIR /src
 # rebuild the entire dependency graph.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --bin ttyview-daemon
+RUN cargo build --release --bin ttyview
 
 # ---------------- runtime ----------------
 FROM debian:bookworm-slim AS runtime
@@ -32,11 +32,11 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /src/target/release/ttyview-daemon /usr/local/bin/ttyview-daemon
+COPY --from=builder /src/target/release/ttyview /usr/local/bin/ttyview
 
 # Cloud Run injects PORT; bind to 0.0.0.0:$PORT by default. Override the
 # entire CMD for local docker runs that want a different bind/flags.
 ENV PORT=8080
 EXPOSE 8080
-ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/ttyview-daemon --bind 0.0.0.0:$PORT \"$@\"", "--"]
+ENTRYPOINT ["/bin/sh", "-c", "exec /usr/local/bin/ttyview --bind 0.0.0.0:$PORT \"$@\"", "--"]
 CMD ["--demo"]

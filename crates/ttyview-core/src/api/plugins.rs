@@ -154,7 +154,7 @@ async fn get_registry(State(app): State<Arc<AppState>>) -> Result<Response, Stat
 
 async fn fetch_remote_json(url: &str) -> Result<Vec<u8>, String> {
     let resp = reqwest::Client::builder()
-        .user_agent("ttyview-daemon")
+        .user_agent("ttyview")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("build client: {e}"))?
@@ -175,7 +175,7 @@ async fn fetch_remote_json(url: &str) -> Result<Vec<u8>, String> {
 
 async fn fetch_remote_text(url: &str) -> Result<Vec<u8>, String> {
     let resp = reqwest::Client::builder()
-        .user_agent("ttyview-daemon")
+        .user_agent("ttyview")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("build client: {e}"))?

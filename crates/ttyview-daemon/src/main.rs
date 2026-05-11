@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-/// ttyview-daemon — web terminal viewer for tmux sessions.
+/// ttyview — web terminal viewer for tmux sessions.
 ///
 /// Attaches to a tmux session via `tmux -C` control mode, parses the
 /// pane bytes through a vte parser into a structured cell grid, and
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Open the daemon's URL in any browser to view your live tmux
 /// session — works on phones, tablets, desktops.
 #[derive(Parser, Debug)]
-#[command(name = "ttyview-daemon", version, about)]
+#[command(name = "ttyview", version, about)]
 struct Cli {
     /// Address to bind the HTTP/WS server on.
     #[arg(long, default_value = "127.0.0.1:7681")]
@@ -81,8 +81,8 @@ struct Cli {
     /// `installed.json` index. Useful for running multiple daemons
     /// with different plugin sets:
     ///
-    ///   ttyview-daemon --bind :7785 --config-dir ~/.config/ttyview-a
-    ///   ttyview-daemon --bind :7786 --config-dir ~/.config/ttyview-b
+    ///   ttyview --bind :7785 --config-dir ~/.config/ttyview-a
+    ///   ttyview --bind :7786 --config-dir ~/.config/ttyview-b
     ///
     /// Browser localStorage is already keyed per-origin (port), so the
     /// active view, theme, layout, and per-plugin storage are also
@@ -95,6 +95,25 @@ struct Cli {
     /// Used by ttyview-manager to label each managed app.
     #[arg(long)]
     app_name: Option<String>,
+
+    /// Where staged + archived image uploads live. Used by the image-
+    /// paste UX: the browser POSTs files here, they sit in
+    /// `<dir>/staging/` until Send, then get archived directly under
+    /// `<dir>/`. Default: `~/.cache/ttyview/uploads`.
+    #[arg(long)]
+    uploads_dir: Option<PathBuf>,
+
+    /// Extra Origin allowed to open a WebSocket. Repeatable. Defaults
+    /// to empty — same-origin (matching the daemon's own page) and
+    /// non-browser clients (no Origin header at all) are always
+    /// allowed. Without this, browsers visiting a malicious page in
+    /// another tab could open a WebSocket to your daemon and drive
+    /// your tmux. Example:
+    ///   --allow-origin https://my-front-end.example.com
+    /// Use the WHATWG-shaped string `<scheme>://<host>[:<port>]` —
+    /// no path, no trailing slash. Match is exact.
+    #[arg(long = "allow-origin", value_name = "ORIGIN")]
+    allow_origin: Vec<String>,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
@@ -121,6 +140,8 @@ async fn main() -> anyhow::Result<()> {
         read_only: cli.read_only || cli.demo,
         config_dir: cli.config_dir.clone(),
         app_name: cli.app_name.clone(),
+        uploads_dir: cli.uploads_dir.clone(),
+        allowed_origins: cli.allow_origin.clone(),
     })
     .await
 }

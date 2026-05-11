@@ -6,7 +6,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -23,9 +24,90 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
     State(app): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> Response {
+    // Cross-origin WebSocket hijack defense.
+    //
+    // Browsers do NOT enforce same-origin on WebSocket handshakes (CORS
+    // doesn't apply to WS). Without this check, any page in any tab can
+    // open `new WebSocket('ws://<our-daemon>/ws')`, subscribe to panes,
+    // and (in non-read-only mode) send keystrokes via `{t:"input"}` —
+    // an internet-to-RCE path for the default own-machine deployment.
+    //
+    // Policy (intentionally permissive for legit non-browser callers):
+    //   1. No Origin header → allow. Server-side WS clients (the sandbox
+    //      broker's tokio-tungstenite bridge, `wscat`, curl) don't send
+    //      Origin, and they aren't the threat model.
+    //   2. Origin host:port matches the request's Host header → allow.
+    //      Same-origin via the daemon's own page.
+    //   3. Origin is in `app.allowed_origins` → allow. The operator opts
+    //      extra origins in via `--allow-origin <ORIGIN>` (repeatable).
+    //   4. Otherwise → 403.
+    if !origin_allowed(&headers, &app.allowed_origins) {
+        let origin = headers
+            .get(axum::http::header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        warn!(
+            target: "ttyview::ws",
+            "rejecting WS upgrade: Origin={origin:?} Host={host:?} (not in same-origin and not in --allow-origin allowlist)"
+        );
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, app))
+        .into_response()
+}
+
+/// Decide whether to accept a WS upgrade based on the Origin header.
+/// See `ws_handler` for the policy. Exposed `pub(crate)` for unit tests.
+pub(crate) fn origin_allowed(headers: &HeaderMap, allowed_origins: &[String]) -> bool {
+    let origin = match headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        // Rule 1: no Origin → allow (non-browser caller).
+        None => return true,
+        Some(s) if s.is_empty() || s == "null" => return true,
+        Some(s) => s,
+    };
+
+    // Rule 3: explicit allowlist match. Exact string compare (scheme +
+    // host + port) is the WHATWG-defined Origin shape.
+    if allowed_origins.iter().any(|o| o == origin) {
+        return true;
+    }
+
+    // Rule 2: same-origin via Host header. Origin includes scheme; Host
+    // is just authority. Compare authorities.
+    if let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
+        if origin_authority(origin) == Some(host) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Extract the authority (host[:port]) from an Origin header value.
+/// Returns None for malformed origins. We only care about http/https.
+fn origin_authority(origin: &str) -> Option<&str> {
+    for scheme in ["http://", "https://"] {
+        if let Some(rest) = origin.strip_prefix(scheme) {
+            // Origin must not have a path; if it does, ignore everything
+            // after the authority. Browsers send `scheme://host[:port]`.
+            let auth = rest.split('/').next().unwrap_or(rest);
+            return Some(auth);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,4 +694,97 @@ fn send_keys_chunked(socket: Option<&str>, pane: &str, keys: &str) -> anyhow::Re
         send_text(keys)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn no_origin_allowed() {
+        // Server-side WS clients (broker bridge, wscat) send no Origin.
+        let h = hdrs(&[("host", "localhost:7681")]);
+        assert!(origin_allowed(&h, &[]));
+    }
+
+    #[test]
+    fn empty_or_null_origin_allowed() {
+        // file:// pages send `Origin: null`. Don't break local docs.
+        let h = hdrs(&[("origin", "null"), ("host", "localhost:7681")]);
+        assert!(origin_allowed(&h, &[]));
+    }
+
+    #[test]
+    fn same_origin_allowed() {
+        let h = hdrs(&[
+            ("origin", "http://localhost:7681"),
+            ("host", "localhost:7681"),
+        ]);
+        assert!(origin_allowed(&h, &[]));
+    }
+
+    #[test]
+    fn same_origin_https_allowed() {
+        let h = hdrs(&[
+            ("origin", "https://eyalev-thinkpad.taild2ae6a.ts.net:7785"),
+            ("host", "eyalev-thinkpad.taild2ae6a.ts.net:7785"),
+        ]);
+        assert!(origin_allowed(&h, &[]));
+    }
+
+    #[test]
+    fn cross_origin_blocked() {
+        // The core finding: evil.com tab tries to WS to localhost daemon.
+        let h = hdrs(&[
+            ("origin", "https://evil.com"),
+            ("host", "127.0.0.1:7681"),
+        ]);
+        assert!(!origin_allowed(&h, &[]));
+    }
+
+    #[test]
+    fn allowlist_exact_match() {
+        let h = hdrs(&[
+            ("origin", "https://my-frontend.example.com"),
+            ("host", "ttyview-daemon.local:7681"),
+        ]);
+        let allow = vec!["https://my-frontend.example.com".to_string()];
+        assert!(origin_allowed(&h, &allow));
+    }
+
+    #[test]
+    fn allowlist_does_not_match_substring() {
+        // Defense against `https://evil.com.example.com` aliasing past
+        // `https://example.com` if we'd used a startsWith check.
+        let h = hdrs(&[
+            ("origin", "https://evil.com.example.com"),
+            ("host", "ttyview-daemon.local:7681"),
+        ]);
+        let allow = vec!["https://example.com".to_string()];
+        assert!(!origin_allowed(&h, &allow));
+    }
+
+    #[test]
+    fn origin_with_path_normalised_to_authority_for_host_match() {
+        // Some clients (or proxies) might tack on a trailing slash —
+        // we ignore everything after the authority. WHATWG says Origin
+        // shouldn't carry a path but be lenient.
+        let h = hdrs(&[
+            ("origin", "http://localhost:7681/"),
+            ("host", "localhost:7681"),
+        ]);
+        assert!(origin_allowed(&h, &[]));
+    }
 }

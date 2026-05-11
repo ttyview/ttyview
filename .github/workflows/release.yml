@@ -51,17 +51,17 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross == true
-        run: cross build --release --target ${{ matrix.target }} --bin ttyview-daemon
+        run: cross build --release --target ${{ matrix.target }} --bin ttyview
 
       - name: Build (cargo)
         if: matrix.cross != true
-        run: cargo build --release --target ${{ matrix.target }} --bin ttyview-daemon
+        run: cargo build --release --target ${{ matrix.target }} --bin ttyview
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          BIN_NAME=ttyview-daemon
+          BIN_NAME=ttyview
           STAGING="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$STAGING"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "$STAGING/"
@@ -73,10 +73,10 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ttyview-daemon-${{ matrix.target }}
+          name: ttyview-${{ matrix.target }}
           path: |
-            ttyview-daemon-*.tar.gz
-            ttyview-daemon-*.tar.gz.sha256
+            ttyview-*.tar.gz
+            ttyview-*.tar.gz.sha256
 
   release:
     name: Publish GitHub Release

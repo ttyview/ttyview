@@ -17,6 +17,7 @@
 
 pub mod http;
 pub mod plugins;
+pub mod uploads;
 pub mod ws;
 
 use crate::state::PaneStore;
@@ -68,13 +69,32 @@ pub struct AppState {
     /// `GET /api/instance`; plugins (e.g. ttyview-app-name) render
     /// it in the header.
     pub app_name: Option<String>,
+    /// Image-paste / upload state. `None` disables the
+    /// `/api/uploads*` endpoints entirely (they 503). The daemon
+    /// binary always populates this; embedders (tests, sandbox
+    /// broker) can opt out by passing None.
+    pub uploads: Option<Arc<uploads::UploadsState>>,
+    /// Extra origins allowed to open a WebSocket beyond same-origin.
+    /// Same-origin (Origin's authority matches the request's Host
+    /// header) is always permitted; non-browser clients with no
+    /// Origin header are also permitted. Anything else must appear
+    /// in this list — see `ws::origin_allowed` for the policy.
+    /// Empty by default (the safe v1 default). Operator opts in via
+    /// `--allow-origin <ORIGIN>` (repeatable).
+    pub allowed_origins: Vec<String>,
 }
 
 pub fn router(state: AppState) -> Router {
+    // Janitor for the uploads staging dir runs as a tokio task; only
+    // spawn it when uploads are actually enabled for this daemon.
+    if let Some(u) = state.uploads.clone() {
+        uploads::spawn_janitor(u);
+    }
     Router::new()
         .merge(http::routes())
         .merge(ws::routes())
         .merge(plugins::routes())
+        .merge(uploads::routes())
         .merge(static_routes())
         .with_state(Arc::new(state))
 }

@@ -16,7 +16,7 @@ Three live demos, no install needed:
 Run a daemon on your machine; it attaches read-only to your tmux sessions and exposes a structured cell-grid + live cell-diff stream over HTTP/WebSocket. Open the daemon's URL in any browser — see your live tmux session rendered.
 
 ```
-[Browser]  ←HTTPS/WSS→  [ttyview-daemon]  ←tmux -C→  [your tmux + Claude Code]
+[Browser]  ←HTTPS/WSS→  [ttyview]  ←tmux -C→  [your tmux + Claude Code]
 ```
 
 ## Why ttyview
@@ -58,14 +58,14 @@ Requires: Rust toolchain, `tmux`, a tmux session running on the same machine.
 git clone https://github.com/ttyview/ttyview
 cd ttyview
 cargo build --release
-./target/release/ttyview-daemon --bind 127.0.0.1:7681
+./target/release/ttyview --bind 127.0.0.1:7681
 # Open http://127.0.0.1:7681 in your browser.
 ```
 
 For phone access, expose the port via Tailscale serve or any HTTPS reverse proxy. Or pass TLS cert/key directly:
 
 ```bash
-./target/release/ttyview-daemon \
+./target/release/ttyview \
   --bind 0.0.0.0:7681 \
   --tls-cert ~/.config/ttyview/tls.crt \
   --tls-key  ~/.config/ttyview/tls.key
@@ -74,7 +74,7 @@ For phone access, expose the port via Tailscale serve or any HTTPS reverse proxy
 ## CLI options
 
 ```
-ttyview-daemon [OPTIONS]
+ttyview [OPTIONS]
 
   --bind <ADDR>          Address to bind.                       [default: 127.0.0.1:7681]
   --socket <NAME>        tmux socket (-L). Default: server's default.
@@ -133,7 +133,7 @@ ttyview/
 │   │   │   └── cli/                    # daemon entry-point
 │   │   ├── ui/index.html               # bundled web client + plugin platform
 │   │   └── community-plugins/          # bundled plugins + registry.json
-│   └── ttyview-daemon/                 # thin CLI wrapping ttyview-core
+│   └── ttyview-daemon/                 # thin CLI wrapping ttyview-core (binary: `ttyview`)
 ├── client/                             # @ttyview/client npm package (stub)
 ├── tests/
 │   ├── client/                         # vitest (35 cases) for the bundled client

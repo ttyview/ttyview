@@ -4,7 +4,7 @@
 # Cloud Run separately.
 #
 # Layout on the VM:
-#   :8081  ttyview-daemon --read-only          (Tier 2 spectator)
+#   :8081  ttyview --read-only          (Tier 2 spectator)
 #   :8082  ttyview-sandbox                     (Tier 3 broker)
 #   :443   Caddy HTTPS reverse-proxy
 #            /spectator  → 127.0.0.1:8081
@@ -26,7 +26,7 @@ GCLOUD=/snap/bin/gcloud
 # directory — the --demo / --read-only flags + the sandbox crate landed
 # after v0.1.0 was tagged, so the GitHub release artifacts are stale.
 # After v0.1.1+ we'll pull from the release like a normal install.
-DAEMON_LOCAL=/home/eyalev/projects/personal/2026-05/ttyview/target/release/ttyview-daemon
+DAEMON_LOCAL=/home/eyalev/projects/personal/2026-05/ttyview/target/release/ttyview
 SANDBOX_LOCAL=/home/eyalev/projects/personal/2026-05/ttyview/target/release/ttyview-sandbox
 
 # 1. VM
@@ -74,8 +74,8 @@ for i in {1..30}; do
 done
 
 # 4. Copy binaries up
-echo "==> copying ttyview-daemon + ttyview-sandbox to VM"
-"$GCLOUD" compute scp "$DAEMON_LOCAL" "$VM":/tmp/ttyview-daemon \
+echo "==> copying ttyview + ttyview-sandbox to VM"
+"$GCLOUD" compute scp "$DAEMON_LOCAL" "$VM":/tmp/ttyview \
   --zone "$ZONE" --project "$PROJECT"
 "$GCLOUD" compute scp "$SANDBOX_LOCAL" "$VM":/tmp/ttyview-sandbox \
   --zone "$ZONE" --project "$PROJECT"
@@ -94,7 +94,7 @@ sudo apt-get update -qq
 sudo apt-get install -y -qq caddy
 
 echo '== install binaries =='
-sudo install -m 0755 /tmp/ttyview-daemon /usr/local/bin/ttyview-daemon
+sudo install -m 0755 /tmp/ttyview /usr/local/bin/ttyview
 sudo install -m 0755 /tmp/ttyview-sandbox /usr/local/bin/ttyview-sandbox
 
 echo '== curated tmux session for Tier 2 (spectator) =='
@@ -115,15 +115,15 @@ ExecStop=/usr/bin/tmux -L ttv-spec kill-server
 WantedBy=multi-user.target
 UNIT
 
-echo '== ttyview-daemon (Tier 2 read-only spectator) =='
+echo '== ttyview (Tier 2 read-only spectator) =='
 sudo tee /etc/systemd/system/ttyview-spectator.service >/dev/null <<'UNIT'
 [Unit]
-Description=ttyview-daemon read-only spectator (Tier 2)
+Description=ttyview read-only spectator (Tier 2)
 After=ttyview-spectator-tmux.service
 Requires=ttyview-spectator-tmux.service
 [Service]
 User=root
-ExecStart=/usr/local/bin/ttyview-daemon --bind 127.0.0.1:8081 --socket ttv-spec --read-only
+ExecStart=/usr/local/bin/ttyview --bind 127.0.0.1:8081 --socket ttv-spec --read-only
 Restart=always
 RestartSec=3
 [Install]
@@ -137,7 +137,7 @@ Description=ttyview-sandbox per-visitor broker (Tier 3)
 After=network.target
 [Service]
 User=root
-ExecStart=/usr/local/bin/ttyview-sandbox --bind 127.0.0.1:8082 --daemon-bin /usr/local/bin/ttyview-daemon
+ExecStart=/usr/local/bin/ttyview-sandbox --bind 127.0.0.1:8082 --daemon-bin /usr/local/bin/ttyview
 Restart=always
 RestartSec=3
 LimitNOFILE=65536

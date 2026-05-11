@@ -48,6 +48,17 @@ pub struct RunOptions {
     /// Human-readable name for this daemon instance. Returned by
     /// `GET /api/instance`; null when unset.
     pub app_name: Option<String>,
+    /// Where staged + archived image uploads live. None = default
+    /// (`~/.cache/ttyview/uploads`). `<dir>/staging/` holds files
+    /// awaiting send; the dir itself holds sent pastes (kept until
+    /// the user clears them).
+    pub uploads_dir: Option<std::path::PathBuf>,
+    /// Extra origins allowed to open a WebSocket beyond same-origin.
+    /// Plumbed into `AppState.allowed_origins`; see that field for
+    /// the policy. Empty by default. Embedders that don't surface a
+    /// `--allow-origin` flag (mobile-cc, the sandbox broker's
+    /// per-session daemon) pass `Vec::new()`.
+    pub allowed_origins: Vec<String>,
 }
 
 pub async fn run_with_options_v2(opts: RunOptions) -> Result<()> {
@@ -77,6 +88,8 @@ pub async fn run_with_options(
         read_only: false,
         config_dir: None,
         app_name: None,
+        uploads_dir: None,
+        allowed_origins: Vec::new(),
     }).await
 }
 
@@ -84,7 +97,8 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     let RunOptions {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
-        demo_mode, read_only, config_dir, app_name,
+        demo_mode, read_only, config_dir, app_name, uploads_dir,
+        allowed_origins,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -199,6 +213,27 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
 
     info!("config_dir: {}", resolved_config_dir.display());
 
+    // Initialise upload state — creates the staging dir on disk. We
+    // build this regardless of demo_mode (handlers gate themselves
+    // on read_only); a daemon with no uploads dir at all is currently
+    // only used by tests and the sandbox broker.
+    let resolved_uploads_dir = uploads_dir
+        .clone()
+        .unwrap_or_else(crate::api::uploads::default_uploads_dir);
+    let uploads_state = match crate::api::uploads::UploadsState::new(resolved_uploads_dir.clone()) {
+        Ok(s) => {
+            info!("uploads_dir: {}", resolved_uploads_dir.display());
+            Some(s)
+        }
+        Err(e) => {
+            warn!(
+                "uploads_dir {}: {e} — /api/uploads endpoints will return 503",
+                resolved_uploads_dir.display()
+            );
+            None
+        }
+    };
+
     // 2. Build HTTP+WS app and serve.
     let app = crate::api::router(AppState {
         store: store.clone(),
@@ -212,6 +247,8 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         demo_mode,
         config_dir: resolved_config_dir,
         app_name: app_name.clone(),
+        uploads: uploads_state,
+        allowed_origins,
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {

@@ -3,7 +3,7 @@
 // Reads `name` from GET /api/instance — populated by the daemon's
 // --app-name flag. ttyview-manager passes manifest.name when spawning
 // each app's daemon. Plugin renders nothing if no name is set, so it
-// safely no-ops on a vanilla ttyview-daemon (no flag, no ugliness).
+// safely no-ops on a vanilla ttyview (no flag, no ugliness).
 //
 // Document title is also updated to match — handy when several
 // ttyview tabs are open in the same browser; each tab's title in the

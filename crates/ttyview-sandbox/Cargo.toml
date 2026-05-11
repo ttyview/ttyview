@@ -1,6 +1,6 @@
 [package]
 name = "ttyview-sandbox"
-description = "Per-visitor sandbox broker: spawns a fresh tmux + ttyview-daemon per session, reverse-proxies HTTP + WebSocket by session id, garbage-collects idle sessions."
+description = "Per-visitor sandbox broker: spawns a fresh tmux + ttyview instance per session, reverse-proxies HTTP + WebSocket by session id, garbage-collects idle sessions."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

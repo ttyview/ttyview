@@ -1,4 +1,4 @@
-// Spawn a fresh tmux server + a fresh ttyview-daemon for an e2e
+// Spawn a fresh tmux server + a fresh ttyview for an e2e
 // run. Uses an isolated tmux socket and a dedicated port so it
 // doesn't collide with the user's local tmux/dev daemon.
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, '../..');
-export const DAEMON_BIN = resolve(REPO_ROOT, 'target/release/ttyview-daemon');
+export const DAEMON_BIN = resolve(REPO_ROOT, 'target/release/ttyview');
 export const TEST_PORT = 7686;
 export const TEST_SOCKET = 'ttyview-test';
 export const TEST_SESSION = 'ttyview-e2e';

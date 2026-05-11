@@ -18,8 +18,8 @@ jobs:
       - name: Upload daemon binary for e2e job
         uses: actions/upload-artifact@v4
         with:
-          name: ttyview-daemon
-          path: target/release/ttyview-daemon
+          name: ttyview
+          path: target/release/ttyview
           retention-days: 1
 
   client-unit:
@@ -47,9 +47,9 @@ jobs:
       - name: Download daemon binary
         uses: actions/download-artifact@v4
         with:
-          name: ttyview-daemon
+          name: ttyview
           path: target/release
-      - run: chmod +x target/release/ttyview-daemon
+      - run: chmod +x target/release/ttyview
       - working-directory: tests/e2e
         run: npm ci || npm install
       - working-directory: tests/e2e

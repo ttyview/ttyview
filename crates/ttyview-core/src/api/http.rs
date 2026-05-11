@@ -41,7 +41,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 #[derive(Debug, Serialize)]
 pub struct InstanceInfo {
     /// Human-readable instance name, set via the daemon's `--app-name`
-    /// flag. Null when unset (the bare `ttyview-daemon` case).
+    /// flag. Null when unset (the bare `ttyview` case).
     pub name: Option<String>,
     /// Whether the daemon was started in --demo mode. Plugins might
     /// surface this differently (e.g. demo banners).

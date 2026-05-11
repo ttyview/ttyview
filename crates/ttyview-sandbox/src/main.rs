@@ -1,6 +1,6 @@
 //! ttyview-sandbox — per-visitor sandbox broker.
 //!
-//! Spins up a fresh `tmux` server + a `ttyview-daemon` per session,
+//! Spins up a fresh `tmux` server + a `ttyview` per session,
 //! reverse-proxies HTTP + WebSocket by session id, garbage-collects
 //! idle sessions.
 //!
@@ -13,7 +13,7 @@
 //!
 //! Each session runs:
 //!   tmux -L ttv-sb-<id> new-session -d -s box bash
-//!   ttyview-daemon --bind 127.0.0.1:<port> --socket ttv-sb-<id>
+//!   ttyview --bind 127.0.0.1:<port> --socket ttv-sb-<id>
 //!
 //! Cleanup loop: every 60 s, kills sessions whose last_activity is
 //! older than --idle-timeout (default 15 min).
@@ -48,8 +48,8 @@ struct Cli {
     #[arg(long, default_value = "0.0.0.0:8080")]
     bind: SocketAddr,
 
-    /// Path to the ttyview-daemon binary spawned per session.
-    #[arg(long, default_value = "/usr/local/bin/ttyview-daemon")]
+    /// Path to the ttyview binary spawned per session.
+    #[arg(long, default_value = "/usr/local/bin/ttyview")]
     daemon_bin: PathBuf,
 
     /// Range of TCP ports allocated to per-session daemons (inclusive).
@@ -140,7 +140,7 @@ const LANDING_HTML: &str = r##"<!doctype html>
 </style></head>
 <body>
   <h1>ttyview sandbox</h1>
-  <p>Click the button below to spin up a fresh, ephemeral tmux + ttyview-daemon for you to play with. The session is private to your URL and self-destructs after <span id="idle"></span> minutes of inactivity.</p>
+  <p>Click the button below to spin up a fresh, ephemeral tmux + ttyview for you to play with. The session is private to your URL and self-destructs after <span id="idle"></span> minutes of inactivity.</p>
   <p>What you can do inside:</p>
   <ul>
     <li>Type into the bash prompt — keystrokes go to a real shell.</li>
@@ -216,7 +216,7 @@ async fn spawn_session(state: &AppState) -> Result<String> {
         anyhow::bail!("tmux new-session failed");
     }
 
-    // 2. Spawn ttyview-daemon attached to that tmux server.
+    // 2. Spawn ttyview attached to that tmux server.
     let daemon = tokio::process::Command::new(&state.cfg.daemon_bin)
         .args([
             "--bind",
@@ -229,7 +229,7 @@ async fn spawn_session(state: &AppState) -> Result<String> {
         .stdin(Stdio::null())
         .kill_on_drop(false)
         .spawn()
-        .with_context(|| "spawning ttyview-daemon")?;
+        .with_context(|| "spawning ttyview")?;
     let daemon_pid = daemon.id().unwrap_or(0);
     // Detach — we track by pid below.
     std::mem::forget(daemon);

@@ -1,6 +1,6 @@
 // E2E: send-input round-trip.
 //
-// Spawns a real tmux server + a real ttyview-daemon, drives the
+// Spawns a real tmux server + a real ttyview, drives the
 // browser-served UI with Playwright, types into the input box, hits
 // Send, and verifies the keys arrived in the tmux pane.
 //
