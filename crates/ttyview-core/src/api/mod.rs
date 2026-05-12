@@ -17,6 +17,7 @@
 
 pub mod http;
 pub mod plugins;
+pub mod sessions;
 pub mod uploads;
 pub mod ws;
 
@@ -95,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .merge(ws::routes())
         .merge(plugins::routes())
         .merge(uploads::routes())
+        .merge(sessions::routes())
         .merge(static_routes())
         .with_state(Arc::new(state))
 }

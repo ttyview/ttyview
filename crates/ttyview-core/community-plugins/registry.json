@@ -126,6 +126,15 @@
       "author": "ttyview",
       "kind": "settingsTab",
       "source": "ttyview-display-toggles.js"
+    },
+    {
+      "id": "ttyview-session-manager",
+      "name": "Session Manager",
+      "description": "Settings tab to manage tmux sessions — create, rename, kill. Uses POST /api/sessions, POST /api/sessions/:name/rename, DELETE /api/sessions/:name. Companion to the inline ＋/⋮ UX in the pane picker; same operations, full-table view for triaging many sessions at once.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "settingsTab",
+      "source": "ttyview-session-manager.js"
     }
   ]
 }

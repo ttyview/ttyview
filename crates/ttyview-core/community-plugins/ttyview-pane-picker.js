@@ -1,4 +1,5 @@
-// ttyview-pane-picker — Recent + All-alphabetical sections.
+// ttyview-pane-picker — Recent + All-alphabetical sections + inline
+// session CRUD (＋ create, ⋮ rename / kill).
 //
 // Replaces the platform's default arbitrary-order picker (DashMap
 // iteration order, effectively random + unstable across requests)
@@ -9,6 +10,13 @@
 // id) so a tmux server restart that re-issues pane ids doesn't
 // orphan the recency list. Same persistence trick as the tabs
 // plugin's pin storage.
+//
+// Session CRUD calls /api/sessions endpoints (added 2026-05-12).
+// The ⋮ per-row menu has Rename / Kill — Kill is gated on a confirm
+// dialog because mobile users fat-finger. ＋ at top of "All" opens a
+// dialog with name + optional cwd. After a successful op the natural
+// panes-updated event from tmux control-mode refreshes the list; we
+// also poll once after 800 ms in case the event lagged.
 //
 // Two contributions:
 //   - panePickerList  → owns #pane-picker-list rendering
@@ -53,6 +61,348 @@
     // the updated order.
   }
 
+  // === Session CRUD over /api/sessions (added 2026-05-12) ===
+  async function apiCreateSession(name, cwd) {
+    const body = cwd ? { name, cwd } : { name };
+    const res = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || ('HTTP ' + res.status));
+    }
+    return res.json();
+  }
+  async function apiRenameSession(from, to) {
+    const res = await fetch('/api/sessions/' + encodeURIComponent(from) + '/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || ('HTTP ' + res.status));
+    }
+    return res.json();
+  }
+  async function apiKillSession(name) {
+    const res = await fetch('/api/sessions/' + encodeURIComponent(name), {
+      method: 'DELETE',
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || ('HTTP ' + res.status));
+    }
+    return res.json();
+  }
+
+  // After a successful CRUD op, tmux control-mode emits panes-updated
+  // on its own — but there's a small lag. Trigger an immediate
+  // re-render too so the user sees their change without waiting.
+  function refreshAfterOp() {
+    setTimeout(rerender, 0);
+    setTimeout(rerender, 800);
+  }
+
+  // === Dialog helpers (mobile-friendly modal, vanilla DOM) ===
+  // Reused for create / rename / kill-confirm. No <dialog> element —
+  // Android Chrome's IME interaction with dialog::backdrop has
+  // surprised us before; rolling a tiny modal is one screenful of code.
+  const DIALOG_STYLE_ID = 'ttyview-pane-picker-dialog-style';
+  function ensureDialogStyle() {
+    if (document.getElementById(DIALOG_STYLE_ID)) return;
+    const st = document.createElement('style');
+    st.id = DIALOG_STYLE_ID;
+    st.textContent = `
+      .pp-modal-overlay {
+        position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+        z-index: 10050; display: flex; align-items: flex-start;
+        justify-content: center; padding: 12vh 16px 16px;
+      }
+      .pp-modal {
+        background: var(--ttv-bg-elev, #1e1e1e);
+        color: var(--ttv-fg, #e6e6e6);
+        border: 1px solid var(--ttv-border, #333);
+        border-radius: 8px; padding: 16px; width: 100%; max-width: 420px;
+        box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+      }
+      .pp-modal h3 { margin: 0 0 12px; font-size: 16px; }
+      .pp-modal label { display: block; font-size: 12px; color: var(--ttv-muted, #888);
+        margin: 12px 0 4px; }
+      .pp-modal input[type="text"] {
+        width: 100%; box-sizing: border-box;
+        background: var(--ttv-bg-elev2, #2a2a2a);
+        color: var(--ttv-fg, #e6e6e6);
+        border: 1px solid var(--ttv-border, #333);
+        border-radius: 4px; font: inherit; font-size: 15px;
+        padding: 8px 10px;
+      }
+      .pp-modal .pp-modal-hint {
+        font-size: 11px; color: var(--ttv-muted, #888); margin-top: 4px;
+      }
+      .pp-modal .pp-modal-err {
+        margin-top: 10px; padding: 8px 10px; border-radius: 4px;
+        background: rgba(220, 60, 60, 0.18);
+        color: #ff9c9c; font-size: 13px;
+      }
+      .pp-modal .pp-modal-buttons {
+        margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end;
+      }
+      .pp-modal button {
+        background: var(--ttv-bg-elev2, #2a2a2a);
+        color: var(--ttv-fg, #e6e6e6);
+        border: 1px solid var(--ttv-border, #333);
+        border-radius: 4px; cursor: pointer; font: inherit; font-size: 14px;
+        padding: 8px 14px; min-height: 36px;
+      }
+      .pp-modal button.pp-primary {
+        background: var(--ttv-accent, #2472c8); border-color: var(--ttv-accent, #2472c8);
+        color: #fff;
+      }
+      .pp-modal button.pp-danger {
+        background: rgba(220, 60, 60, 0.25); border-color: rgba(220, 60, 60, 0.55);
+        color: #ff9c9c;
+      }
+      /* Toolbar at top of picker list */
+      #pane-picker-list .pp-toolbar {
+        padding: 8px 16px; display: flex; gap: 8px;
+        border-bottom: 1px solid var(--ttv-border, #333);
+        background: var(--ttv-bg-elev, #1e1e1e);
+        position: sticky; top: 0; z-index: 1;
+      }
+      #pane-picker-list .pp-toolbar button {
+        background: var(--ttv-bg-elev2, #2a2a2a);
+        color: var(--ttv-fg, #e6e6e6);
+        border: 1px solid var(--ttv-border, #333);
+        border-radius: 4px; cursor: pointer; font: inherit; font-size: 13px;
+        padding: 6px 12px; min-height: 32px;
+      }
+      /* Per-row ⋮ kebab */
+      #pane-picker-list .pp-item { position: relative; }
+      #pane-picker-list .pp-kebab {
+        position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+        background: transparent; color: var(--ttv-muted, #888);
+        border: 1px solid transparent; border-radius: 4px;
+        cursor: pointer; font: inherit; font-size: 18px; line-height: 1;
+        padding: 4px 8px; min-width: 32px; min-height: 32px;
+      }
+      #pane-picker-list .pp-kebab:hover { background: var(--ttv-bg-elev2, #2a2a2a); }
+      /* Kebab popover anchored to the row */
+      .pp-popover {
+        position: fixed; z-index: 10049;
+        background: var(--ttv-bg-elev, #1e1e1e);
+        border: 1px solid var(--ttv-border, #333);
+        border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        min-width: 140px; padding: 4px 0;
+      }
+      .pp-popover button {
+        display: block; width: 100%; text-align: left;
+        background: transparent; color: var(--ttv-fg, #e6e6e6);
+        border: 0; cursor: pointer; font: inherit; font-size: 14px;
+        padding: 10px 14px;
+      }
+      .pp-popover button:hover { background: var(--ttv-bg-elev2, #2a2a2a); }
+      .pp-popover button.pp-danger { color: #ff9c9c; }
+    `;
+    document.head.appendChild(st);
+  }
+  // Opens a centered modal with one or more text fields. Returns a
+  // promise that resolves with field values on submit, or null on
+  // cancel. `danger:true` styles the primary button red and is used
+  // for kill-confirm.
+  function openDialog({ title, fields, submitLabel, danger, hint }) {
+    return new Promise(function(resolve) {
+      ensureDialogStyle();
+      const overlay = document.createElement('div');
+      overlay.className = 'pp-modal-overlay';
+      const modal = document.createElement('div');
+      modal.className = 'pp-modal';
+      overlay.appendChild(modal);
+      const h = document.createElement('h3');
+      h.textContent = title;
+      modal.appendChild(h);
+      const inputs = [];
+      (fields || []).forEach(function(f) {
+        const lbl = document.createElement('label');
+        lbl.textContent = f.label;
+        modal.appendChild(lbl);
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.value = f.value || '';
+        inp.placeholder = f.placeholder || '';
+        inp.autocapitalize = 'off';
+        inp.autocomplete = 'off';
+        inp.spellcheck = false;
+        inputs.push({ key: f.key, el: inp });
+        modal.appendChild(inp);
+        if (f.hint) {
+          const hi = document.createElement('div');
+          hi.className = 'pp-modal-hint';
+          hi.textContent = f.hint;
+          modal.appendChild(hi);
+        }
+      });
+      if (hint) {
+        const gh = document.createElement('div');
+        gh.className = 'pp-modal-hint';
+        gh.textContent = hint;
+        gh.style.marginTop = '8px';
+        modal.appendChild(gh);
+      }
+      const err = document.createElement('div');
+      err.className = 'pp-modal-err';
+      err.style.display = 'none';
+      modal.appendChild(err);
+      const btnRow = document.createElement('div');
+      btnRow.className = 'pp-modal-buttons';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel';
+      const submit = document.createElement('button');
+      submit.type = 'button';
+      submit.textContent = submitLabel || 'OK';
+      submit.className = danger ? 'pp-danger' : 'pp-primary';
+      btnRow.appendChild(cancel);
+      btnRow.appendChild(submit);
+      modal.appendChild(btnRow);
+      function close(result) {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey, true);
+        resolve(result);
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.stopPropagation(); close(null); }
+        if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT') {
+          e.preventDefault(); doSubmit();
+        }
+      }
+      function doSubmit() {
+        const out = {};
+        inputs.forEach(function(i) { out[i.key] = i.el.value.trim(); });
+        // Inline error-display path: caller sets err.textContent on
+        // a rejected onSubmit via the showError hook on the resolved
+        // object. Here we just resolve and let the caller decide.
+        close({ values: out, showError: function(m) {
+          err.textContent = m; err.style.display = 'block';
+        }});
+      }
+      cancel.addEventListener('click', function() { close(null); });
+      submit.addEventListener('click', doSubmit);
+      overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) close(null);
+      });
+      document.addEventListener('keydown', onKey, true);
+      document.body.appendChild(overlay);
+      if (inputs[0]) setTimeout(function() { inputs[0].el.focus(); }, 50);
+    });
+  }
+  // The resolve-with-callback pattern lets the caller try the API,
+  // display an inline error inside the dialog on failure, and keep
+  // re-prompting until success or Cancel. Wrap it here.
+  async function promptUntilSuccess(opts, doOp) {
+    while (true) {
+      const r = await openDialog(opts);
+      if (!r) return null;
+      try {
+        await doOp(r.values);
+        return r.values;
+      } catch (e) {
+        r.showError(String(e.message || e));
+        // Re-open with the entered values so the user can fix
+        // their typo without retyping everything.
+        opts.fields = opts.fields.map(function(f) {
+          return Object.assign({}, f, { value: r.values[f.key] || '' });
+        });
+      }
+    }
+  }
+  function closeAnyPopover() {
+    const existing = document.querySelector('.pp-popover');
+    if (existing) existing.remove();
+  }
+  function openRowPopover(anchorEl, p) {
+    closeAnyPopover();
+    const pop = document.createElement('div');
+    pop.className = 'pp-popover';
+    const r = anchorEl.getBoundingClientRect();
+    const popW = 160;
+    let left = r.right - popW;
+    let top  = r.bottom + 4;
+    // Flip up if not enough room below
+    if (top + 96 > window.innerHeight) top = r.top - 96;
+    if (left < 8) left = 8;
+    pop.style.left = left + 'px';
+    pop.style.top  = top  + 'px';
+    pop.style.minWidth = popW + 'px';
+    const renameBtn = document.createElement('button');
+    renameBtn.textContent = 'Rename…';
+    renameBtn.addEventListener('click', async function(ev) {
+      ev.stopPropagation();
+      closeAnyPopover();
+      await promptUntilSuccess({
+        title: 'Rename session',
+        fields: [{ key: 'to', label: 'New name', value: p.session,
+                   placeholder: p.session,
+                   hint: 'Letters, digits, _ . - · max 64 chars' }],
+        submitLabel: 'Rename',
+      }, function(vals) { return apiRenameSession(p.session, vals.to); });
+      refreshAfterOp();
+    });
+    const killBtn = document.createElement('button');
+    killBtn.className = 'pp-danger';
+    killBtn.textContent = 'Kill session…';
+    killBtn.addEventListener('click', async function(ev) {
+      ev.stopPropagation();
+      closeAnyPopover();
+      const confirm = await openDialog({
+        title: 'Kill session?',
+        fields: [],
+        hint: 'Kills tmux session "' + p.session + '" and all panes inside it. This is not reversible.',
+        submitLabel: 'Kill',
+        danger: true,
+      });
+      if (!confirm) return;
+      try {
+        await apiKillSession(p.session);
+      } catch (e) {
+        // Inline alert isn't ideal but a confirm dialog with no
+        // inputs has no err slot. Cheap fallback for an edge case.
+        alert('Kill failed: ' + (e.message || e));
+        return;
+      }
+      refreshAfterOp();
+    });
+    pop.appendChild(renameBtn);
+    pop.appendChild(killBtn);
+    document.body.appendChild(pop);
+    // Click-away closes
+    setTimeout(function() {
+      document.addEventListener('click', function awayHandler(e) {
+        if (!pop.contains(e.target)) {
+          closeAnyPopover();
+          document.removeEventListener('click', awayHandler, true);
+        }
+      }, true);
+    }, 0);
+  }
+  async function promptCreate() {
+    await promptUntilSuccess({
+      title: 'New tmux session',
+      fields: [
+        { key: 'name', label: 'Name',
+          placeholder: 'my-session',
+          hint: 'Letters, digits, _ . - · max 64 chars' },
+        { key: 'cwd', label: 'Starting directory (optional)',
+          placeholder: '/home/eyalev/projects/…',
+          hint: 'Absolute path. Leave blank for tmux default.' },
+      ],
+      submitLabel: 'Create',
+    }, function(vals) { return apiCreateSession(vals.name, vals.cwd || null); });
+    refreshAfterOp();
+  }
+
   // === Renderers ===
   function renderRow(p, panes, opts) {
     // Same disambiguation rule as core's paneLabel: only suffix when
@@ -93,6 +443,19 @@
       // will. Avoids double-counting the "I just clicked it" touch.
       tv.selectPane(p.id);
     });
+    // ⋮ kebab → row popover (Rename / Kill). stopPropagation so the
+    // row's selectPane handler doesn't fire when the user just wants
+    // to open the menu.
+    const kebab = document.createElement('button');
+    kebab.type = 'button';
+    kebab.className = 'pp-kebab';
+    kebab.setAttribute('aria-label', 'Session actions');
+    kebab.textContent = '⋮';
+    kebab.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      openRowPopover(kebab, p);
+    });
+    item.appendChild(kebab);
     return item;
   }
   function renderHeader(text) {
@@ -151,6 +514,21 @@
     const rowOpts = { suppressMeta };
 
     pickerSlot.innerHTML = '';
+    // Toolbar with ＋ New session. Sticks to the top so it stays
+    // reachable when the picker scrolls.
+    ensureDialogStyle();
+    const toolbar = document.createElement('div');
+    toolbar.className = 'pp-toolbar';
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.textContent = '＋ New session';
+    addBtn.addEventListener('click', function(ev) {
+      ev.stopPropagation();
+      promptCreate();
+    });
+    toolbar.appendChild(addBtn);
+    pickerSlot.appendChild(toolbar);
+
     if (settings.showRecent && withTs.length > 0) {
       pickerSlot.appendChild(renderHeader('Recent'));
       for (const { p } of withTs) pickerSlot.appendChild(renderRow(p, panes, rowOpts));
