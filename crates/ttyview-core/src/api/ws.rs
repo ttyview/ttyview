@@ -543,6 +543,12 @@ async fn handle_client_msg(
             // because some plugins (e.g. ttyview-quickkeys) fire input
             // events on every button tap.
             if app.read_only {
+                tracing::debug!(
+                    target: "ttyview::ws::input",
+                    pane = %pane,
+                    keys_len = keys.len(),
+                    "input dropped: read-only mode"
+                );
                 let reply = ServerReply::Ack {
                     for_kind: "input".into(),
                     ok: false,
@@ -554,14 +560,57 @@ async fn handle_client_msg(
                 let _ = (pane, keys);
                 return Ok(());
             }
+            // Log every input attempt at info. Truncate the keys preview
+            // to 32 chars (sanitised) — full content would be a privacy
+            // leak (passwords, prompts) and a noise source. The preview
+            // is enough to distinguish "user typed pwd<CR>" from
+            // "ttyview-quickkeys sent <Esc>".
+            let keys_preview = preview_keys(&keys, 32);
+            tracing::info!(
+                target: "ttyview::ws::input",
+                pane = %pane,
+                keys_len = keys.len(),
+                keys_preview = %keys_preview,
+                "input received"
+            );
             // Forward to tmux send-keys. Splits at 16KB to dodge the
             // documented send-keys size limit.
             let socket = app.tmux_socket.clone();
+            let pane_for_log = pane.clone();
             let result = tokio::task::spawn_blocking(move || {
                 send_keys_chunked(socket.as_deref(), &pane, &keys)
             })
             .await
             .map_err(|e| anyhow::anyhow!("join error: {e}"))?;
+            if let Err(e) = &result {
+                let msg = e.to_string();
+                // Classify the failure so journalctl greps are useful.
+                // tmux send-keys against a vanished pane returns the
+                // string "can't find pane" (single-quoted) on stderr —
+                // most common cause of "tap Send → nothing happens" is
+                // a tmux server restart minting fresh pane ids.
+                let stale_pane = msg.contains("can't find pane")
+                    || msg.contains("no such pane")
+                    || msg.contains("pane not found");
+                if stale_pane {
+                    tracing::warn!(
+                        target: "ttyview::ws::input",
+                        pane = %pane_for_log,
+                        stale_pane = true,
+                        reason = %msg,
+                        "input failed: target pane no longer exists in tmux \
+                         (client subscription is stale; re-pick from /panes)"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "ttyview::ws::input",
+                        pane = %pane_for_log,
+                        stale_pane = false,
+                        reason = %msg,
+                        "input failed"
+                    );
+                }
+            }
             let reply = match result {
                 Ok(()) => ServerReply::Ack {
                     for_kind: "input".into(),
@@ -630,6 +679,41 @@ async fn append_diag_events(
         .await?;
     file.write_all(buf.as_bytes()).await?;
     Ok(())
+}
+
+/// Build a privacy-safe preview of a keys payload for logs. Control
+/// characters become readable escapes (CR → `<CR>`, LF → `<LF>`,
+/// 0x1b → `<ESC>`, 0x03 → `<C-c>`, …). Truncates to `max` chars and
+/// suffixes `…` so a 32-char preview is always 32 chars or less. We
+/// never log the raw keys — `pwd\r` is fine, but a prompt body or a
+/// pasted password is not.
+fn preview_keys(keys: &str, max: usize) -> String {
+    let mut out = String::with_capacity(max + 4);
+    for ch in keys.chars() {
+        if out.chars().count() >= max {
+            out.push('…');
+            break;
+        }
+        let token = match ch {
+            '\r' => "<CR>".to_string(),
+            '\n' => "<LF>".to_string(),
+            '\t' => "<TAB>".to_string(),
+            '\x1b' => "<ESC>".to_string(),
+            '\x03' => "<C-c>".to_string(),
+            '\x04' => "<C-d>".to_string(),
+            '\x0c' => "<C-l>".to_string(),
+            c if c.is_control() => format!("<{:#04x}>", c as u32),
+            c => c.to_string(),
+        };
+        out.push_str(&token);
+        if out.chars().count() >= max + 8 {
+            // some token blew us past the budget; trim
+            out = out.chars().take(max).collect::<String>();
+            out.push('…');
+            break;
+        }
+    }
+    out
 }
 
 fn send_keys_chunked(socket: Option<&str>, pane: &str, keys: &str) -> anyhow::Result<()> {
@@ -786,5 +870,44 @@ mod origin_tests {
             ("host", "localhost:7681"),
         ]);
         assert!(origin_allowed(&h, &[]));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn renders_visible_text_unchanged() {
+        assert_eq!(preview_keys("pwd", 32), "pwd");
+    }
+
+    #[test]
+    fn escapes_cr_lf_esc() {
+        assert_eq!(preview_keys("pwd\r", 32), "pwd<CR>");
+        assert_eq!(preview_keys("a\nb\tc", 32), "a<LF>b<TAB>c");
+        assert_eq!(preview_keys("\x1b[A", 32), "<ESC>[A");
+    }
+
+    #[test]
+    fn escapes_common_ctrl_keys() {
+        assert_eq!(preview_keys("\x03", 32), "<C-c>");
+        assert_eq!(preview_keys("\x04", 32), "<C-d>");
+        assert_eq!(preview_keys("\x0c", 32), "<C-l>");
+    }
+
+    #[test]
+    fn truncates_long_payloads_with_ellipsis() {
+        // 40-char ASCII payload, max 8 → result has '…' suffix.
+        let p = preview_keys(&"a".repeat(40), 8);
+        assert!(p.ends_with('…'), "got {p}");
+        assert!(p.chars().count() <= 9, "got {p} ({} chars)", p.chars().count());
+    }
+
+    #[test]
+    fn unknown_control_chars_are_hex() {
+        // 0x07 (BEL) isn't in our well-known set.
+        let p = preview_keys("\x07", 32);
+        assert_eq!(p, "<0x07>");
     }
 }

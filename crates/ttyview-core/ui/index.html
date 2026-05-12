@@ -1299,6 +1299,31 @@ function connectWs() {
   ws.onmessage = function(ev) {
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    // Acks / errs don't carry a pane id; surface them BEFORE the
+    // pane filter or they'd silently drop. Today's debug session
+    // ("typed pwd → nothing happened, no UI feedback") was exactly
+    // this: send-keys returned ok=false because the target pane was
+    // stale, but the ack was filtered out below and never surfaced.
+    if (msg.t === 'ack') {
+      if (msg.ok === false) {
+        console.error('[ttyview] server ack ok=false', msg);
+        ttvDiag('ack-error', { for: msg.for, message: msg.message });
+        // Visibly surface "input" failures — the user just pressed
+        // Send and nothing visibly changed. Other ack kinds (sub /
+        // resize) fire too often or are too noisy to toast.
+        if (msg.for === 'input') {
+          setStatus('input rejected: ' + (msg.message || 'unknown'), 'error');
+          // Clear the status after 4 s so it doesn't stick.
+          setTimeout(function() { setStatus('connected', 'connected'); }, 4000);
+        }
+      }
+      return;
+    }
+    if (msg.t === 'err') {
+      console.error('[ttyview] server err', msg);
+      ttvDiag('server-err', { message: msg.message });
+      return;
+    }
     if (msg.p !== activePaneId) return;
     if (msg.t === 'cell-diff') {
       // Phase 2: forward to the terminal-view plugin via event.
