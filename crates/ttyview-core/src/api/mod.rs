@@ -18,6 +18,7 @@
 pub mod http;
 pub mod plugins;
 pub mod sessions;
+pub mod state;
 pub mod uploads;
 pub mod ws;
 
@@ -83,6 +84,12 @@ pub struct AppState {
     /// Empty by default (the safe v1 default). Operator opts in via
     /// `--allow-origin <ORIGIN>` (repeatable).
     pub allowed_origins: Vec<String>,
+    /// Server-authoritative client state (active terminal view, theme,
+    /// pinned tabs, display toggles, generic per-plugin storage). See
+    /// `state.rs` for the wire surface. Every browser hitting this
+    /// daemon hydrates from here on boot, so the layout is uniform
+    /// regardless of localStorage contents.
+    pub state: Arc<state::StateStore>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -97,6 +104,7 @@ pub fn router(state: AppState) -> Router {
         .merge(plugins::routes())
         .merge(uploads::routes())
         .merge(sessions::routes())
+        .merge(state::routes())
         .merge(static_routes())
         .with_state(Arc::new(state))
 }

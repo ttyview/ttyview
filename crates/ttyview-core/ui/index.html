@@ -634,6 +634,123 @@ let ws = null;
 let wsRetryMs = 1000;
 
 // =============================================================
+// Server-authoritative client state
+// =============================================================
+//
+// Layout-level preferences (active terminal view, active theme,
+// pinned tabs, display toggles, generic per-plugin storage) live
+// on the daemon under `/api/state` so every browser hitting the
+// same daemon sees the same UI. localStorage stays as a cache for
+// fast first paint, but the server overrides it on every page
+// load (see `hydrateServerState` below).
+//
+// Per-device state (which pane you last viewed on THIS phone,
+// font size, the project-hub tab) deliberately stays
+// localStorage-only — it doesn't go through these helpers.
+//
+// Wire: see crates/ttyview-core/src/api/state.rs.
+const __serverState = {
+  // Keys we PUT to /api/state when set, DELETE when unset.
+  // Anything not in this set is localStorage-only (per-device).
+  syncedKeys: new Set([
+    'ttv-active-view',
+    'ttv-active-theme',
+  ]),
+  // Prefix-based opt-in: every key starting with one of these
+  // also syncs. Lets us migrate whole plugin namespaces at once
+  // without naming every key.
+  syncedPrefixes: [
+    'ttv-plugin:',  // every plugin's storage namespace
+  ],
+};
+function __serverStateShouldSync(key) {
+  if (__serverState.syncedKeys.has(key)) return true;
+  for (const p of __serverState.syncedPrefixes) {
+    if (key.startsWith(p)) return true;
+  }
+  return false;
+}
+function __serverStatePut(key, value) {
+  if (!__serverStateShouldSync(key)) return;
+  // Fire-and-forget; failures land in console.error + diag log.
+  // The localStorage write has already happened, so even if the
+  // server PUT fails the UI still has correct state in this
+  // browser; the next browser to hit the daemon may show stale.
+  fetch('/api/state/' + encodeURIComponent(key), {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(value),
+  }).then(function(r) {
+    if (!r.ok) {
+      console.error('[ttyview] PUT /api/state/' + key + ' → ' + r.status);
+      if (typeof ttvDiag === 'function') {
+        ttvDiag('state-put-fail', { key: key, status: r.status });
+      }
+    }
+  }).catch(function(e) {
+    console.error('[ttyview] PUT /api/state/' + key + ' threw', e);
+    if (typeof ttvDiag === 'function') {
+      ttvDiag('state-put-throw', { key: key, msg: String(e && e.message) });
+    }
+  });
+}
+function __serverStateDelete(key) {
+  if (!__serverStateShouldSync(key)) return;
+  fetch('/api/state/' + encodeURIComponent(key), {
+    method: 'DELETE',
+  }).then(function(r) {
+    if (!r.ok) console.error('[ttyview] DELETE /api/state/' + key + ' → ' + r.status);
+  }).catch(function(e) {
+    console.error('[ttyview] DELETE /api/state/' + key + ' threw', e);
+  });
+}
+async function hydrateServerState() {
+  // Fetch the server's view of layout state and overwrite
+  // localStorage from it. Runs BEFORE plugins eval, so when a
+  // plugin's `tv.storage('id').get(k)` reads localStorage, it
+  // gets the server-authoritative value.
+  //
+  // On failure (network blip, daemon doesn't speak /api/state
+  // yet): log + fall through. localStorage stays whatever it was;
+  // the user gets a "this browser's last state" experience,
+  // which matches the pre-server-state behavior.
+  let resp;
+  try {
+    resp = await fetch('/api/state', { cache: 'no-store' });
+  } catch (e) {
+    console.warn('[ttyview] /api/state fetch failed; using localStorage-only state', e);
+    return;
+  }
+  if (!resp.ok) {
+    console.warn('[ttyview] /api/state → ' + resp.status + '; using localStorage-only state');
+    return;
+  }
+  let body;
+  try { body = await resp.json(); }
+  catch (e) {
+    console.warn('[ttyview] /api/state parse failed', e);
+    return;
+  }
+  const keys = (body && body.keys) || {};
+  // Apply server state to localStorage. We don't *remove* extra
+  // localStorage keys here — only ones the server has opinions on
+  // get overwritten. That way per-device keys (ttv-last-pane-id,
+  // font size, etc.) survive untouched.
+  for (const k of Object.keys(keys)) {
+    if (!__serverStateShouldSync(k)) continue;
+    try {
+      // Server stores parsed JSON; localStorage stores strings.
+      // JSON.stringify it back so `pluginStorage.get` (which
+      // JSON.parses) gets the right value.
+      localStorage.setItem(k, JSON.stringify(keys[k]));
+    } catch {}
+  }
+  if (typeof ttvDiag === 'function') {
+    ttvDiag('state-hydrated', { count: Object.keys(keys).length });
+  }
+}
+
+// =============================================================
 // Plugin API surface
 // =============================================================
 //
@@ -716,6 +833,10 @@ window.ttyview = (function() {
     const prefix = 'ttv-plugin:' + pluginId + ':';
     return {
       get(key) {
+        // Sync read from localStorage cache. Boot's
+        // `hydrateServerState()` has already overwritten the cache
+        // with server-authoritative values, so this returns the
+        // same thing every browser hitting this daemon would.
         try {
           const raw = localStorage.getItem(prefix + key);
           return raw == null ? null : JSON.parse(raw);
@@ -723,9 +844,15 @@ window.ttyview = (function() {
       },
       set(key, value) {
         try { localStorage.setItem(prefix + key, JSON.stringify(value)); } catch {}
+        // Fire-and-forget PUT to /api/state so the next browser
+        // sees the same value. Failure (offline / daemon doesn't
+        // speak /api/state yet) leaves this browser with correct
+        // state; only cross-browser sync is degraded.
+        try { __serverStatePut(prefix + key, value); } catch {}
       },
       remove(key) {
         try { localStorage.removeItem(prefix + key); } catch {}
+        try { __serverStateDelete(prefix + key); } catch {}
       },
     };
   }
@@ -803,6 +930,11 @@ window.ttyview = (function() {
           if (id) localStorage.setItem('ttv-active-theme', id);
           else localStorage.removeItem('ttv-active-theme');
         } catch {}
+        // Sync to server so every browser sees the same active theme.
+        try {
+          if (id) __serverStatePut('ttv-active-theme', id);
+          else __serverStateDelete('ttv-active-theme');
+        } catch {}
         if (!id) { applyThemeVars(null); emit('theme-activated', { id: null }); return; }
         const def = registries.theme.get(id);
         applyThemeVars(def && def.vars);
@@ -824,6 +956,11 @@ window.ttyview = (function() {
         try {
           if (id) localStorage.setItem('ttv-active-view', id);
           else localStorage.removeItem('ttv-active-view');
+        } catch {}
+        // Sync to server so every browser sees the same active view.
+        try {
+          if (id) __serverStatePut('ttv-active-view', id);
+          else __serverStateDelete('ttv-active-view');
         } catch {}
         if (!id) return;
         const def = registries.terminalView.get(id);
@@ -2966,6 +3103,32 @@ function pickInitialPane(panes) {
 }
 
 (async function() {
+  // Pull server-authoritative layout state into localStorage BEFORE
+  // plugins eval. This is what makes the daemon's view consistent
+  // across every browser: server stores active-view, active-theme,
+  // pinned tabs, display toggles, all plugin storage namespaces.
+  // localStorage is treated as a cache that's refreshed on every
+  // page load. See `hydrateServerState` definition above for the
+  // shape + per-key sync policy.
+  await hydrateServerState();
+  // Re-apply theme + view from hydrated localStorage. The earlier
+  // synchronous IIFEs (theme auto-apply at ~line 875, active-view
+  // restore at ~line 2868) ran with whatever stale values
+  // localStorage had at parse time — now that we've potentially
+  // overwritten those, replay the same logic so the visible UI
+  // matches the server state.
+  try {
+    const themeId = localStorage.getItem('ttv-active-theme');
+    if (themeId && window.ttyview._internal.registries.theme.has(themeId)) {
+      window.ttyview._internal.setActiveThemeId(themeId);
+    }
+    const viewId = localStorage.getItem('ttv-active-view');
+    if (viewId && window.ttyview._internal.registries.terminalView.has(viewId)) {
+      window.ttyview._internal.setActiveTerminalViewId(viewId);
+    }
+  } catch (e) {
+    console.warn('[ttyview] post-hydrate re-apply threw', e);
+  }
   // Load installed plugins BEFORE we fetch panes — gives plugins a
   // chance to subscribe to events emitted during pane bootstrap (e.g.
   // panes-updated, grid-loaded). A plugin that registers late still

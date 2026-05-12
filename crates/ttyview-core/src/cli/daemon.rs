@@ -234,6 +234,15 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         }
     };
 
+    // Open the server-side state store (<config_dir>/state.json).
+    // Layout / preference state syncs through this — see
+    // `crate::api::state` for the rationale. Failure to open is
+    // unusual (FS permissions) and fatal: the daemon would otherwise
+    // silently lose every preference toggle.
+    let state_store = crate::api::state::StateStore::open(&resolved_config_dir)
+        .with_context(|| format!("opening state store under {}", resolved_config_dir.display()))?;
+    info!("state_store: {}/state.json", resolved_config_dir.display());
+
     // 2. Build HTTP+WS app and serve.
     let app = crate::api::router(AppState {
         store: store.clone(),
@@ -249,6 +258,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         app_name: app_name.clone(),
         uploads: uploads_state,
         allowed_origins,
+        state: state_store,
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {
