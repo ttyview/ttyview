@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ttyview-core", "crates/ttyview-daemon", "crates/ttyview-sandbox"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/ttyview/ttyview-daemon"
