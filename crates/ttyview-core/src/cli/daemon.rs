@@ -30,6 +30,13 @@ pub async fn run_with_tls(
 
 /// All daemon-startup knobs in one struct. Lets the binary pass new
 /// flags without breaking every existing call site of `run_with_options`.
+///
+/// **Construction:** prefer `RunOptions { addr, ..Default::default() }`
+/// over a full struct literal — that way new fields added in future
+/// `ttyview-core` releases don't force downstream consumers to update
+/// their construction site. Future releases will add `#[non_exhaustive]`
+/// to make this the only valid construction path; until then, both
+/// forms compile.
 pub struct RunOptions {
     pub addr: SocketAddr,
     pub socket: Option<String>,
@@ -59,6 +66,32 @@ pub struct RunOptions {
     /// `--allow-origin` flag (mobile-cc, the sandbox broker's
     /// per-session daemon) pass `Vec::new()`.
     pub allowed_origins: Vec<String>,
+}
+
+/// Defaults are intentionally conservative: loopback bind, no TLS, no
+/// diag log, no demo / read-only, empty origin allowlist. Consumers
+/// override only the fields they care about via
+/// `RunOptions { addr, ..Default::default() }`.
+impl Default for RunOptions {
+    fn default() -> Self {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        Self {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7681),
+            socket: None,
+            rows: 50,
+            cols: 80,
+            tls_cert: None,
+            tls_key: None,
+            diag_log: None,
+            registry_url: None,
+            demo_mode: false,
+            read_only: false,
+            config_dir: None,
+            app_name: None,
+            uploads_dir: None,
+            allowed_origins: Vec::new(),
+        }
+    }
 }
 
 pub async fn run_with_options_v2(opts: RunOptions) -> Result<()> {
