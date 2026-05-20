@@ -501,15 +501,25 @@ async fn get_cc_transcript(
 ) -> Result<Response, (StatusCode, String)> {
     let tail = q.tail.unwrap_or(300).min(5000);
 
-    // Demo mode: serve the bundled curated transcript regardless of
-    // pane id. This is what makes `--demo` link-shareable — visitors
-    // get a real-looking CC chat without any tmux on the host.
+    // Demo mode: route the request to one of five bundled canned
+    // transcripts by pane id. Each demo pane maps to a different
+    // fictional CC conversation so switching between pinned tabs
+    // feels alive. Unknown pane ids fall back to the first.
     if app.demo_mode {
         use rust_embed::RustEmbed;
         #[derive(RustEmbed)]
         #[folder = "community-plugins/"]
         struct Bundle;
-        let asset = Bundle::get("demo-transcript.jsonl")
+        let asset_name = match id.as_str() {
+            "%demo1" => "demo-transcript-mobile-cc.jsonl",
+            "%demo2" => "demo-transcript-ttyview-platform.jsonl",
+            "%demo3" => "demo-transcript-tmux-web.jsonl",
+            "%demo4" => "demo-transcript-blog-post-draft.jsonl",
+            "%demo5" => "demo-transcript-feature-experiments.jsonl",
+            _        => "demo-transcript-mobile-cc.jsonl",
+        };
+        let asset = Bundle::get(asset_name)
+            .or_else(|| Bundle::get("demo-transcript.jsonl"))
             .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "demo transcript missing".into()))?;
         let text = String::from_utf8_lossy(&asset.data);
         let mut turns: Vec<serde_json::Value> = Vec::new();
@@ -524,7 +534,7 @@ async fn get_cc_transcript(
         }
         return Ok(Json(CcTranscriptResp {
             project_dir: "(demo)".into(),
-            jsonl: "demo-transcript.jsonl".into(),
+            jsonl: asset_name.into(),
             count: turns.len(),
             turns,
         })

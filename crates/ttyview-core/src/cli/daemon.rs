@@ -186,17 +186,27 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     store.install_tracer_from_env().await;
 
     if demo_mode {
-        // No tmux. Seed one synthetic pane that the CC view can attach
-        // to. The cc-transcript endpoint short-circuits in demo mode
-        // and serves the bundled JSONL regardless of pane id.
-        info!("demo mode — skipping tmux; seeding synthetic pane %demo");
-        store
-            .apply(SourceEvent::PaneAdded {
-                pane: PaneId("%demo".into()),
-                session: Some("demo".into()),
-                window: Some("0".into()),
-            })
-            .await;
+        // No tmux. Seed five synthetic panes so the picker / pinned-
+        // tabs row / pane counter feel populated. The cc-transcript
+        // endpoint routes by pane id, so each tab shows a different
+        // canned conversation.
+        info!("demo mode — skipping tmux; seeding 5 synthetic panes");
+        let demo_panes: &[(&str, &str)] = &[
+            ("%demo1", "mobile-cc"),
+            ("%demo2", "ttyview-platform"),
+            ("%demo3", "tmux-web"),
+            ("%demo4", "blog-post-draft"),
+            ("%demo5", "feature-experiments"),
+        ];
+        for (id, session) in demo_panes {
+            store
+                .apply(SourceEvent::PaneAdded {
+                    pane: PaneId((*id).into()),
+                    session: Some((*session).into()),
+                    window: Some("0".into()),
+                })
+                .await;
+        }
         // Auto-install the curated demo plugins so the page lands in a
         // presentable state on first visit. Best-effort — log on
         // failure but don't block startup.

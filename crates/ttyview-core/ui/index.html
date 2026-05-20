@@ -1879,15 +1879,19 @@ async function setPluginEnabled(id, enabled) {
     const pluginItems = Array.from(reg.values()).map(function(def) {
       return { id: def.id, title: def.title, plugin: def };
     });
+    // In demo mode the Discover tab is meaningless — everything's
+    // already pre-installed and Install would 403 anyway. Hide it.
+    const isDemo = document.body.classList.contains('ttv-demo');
+    const baseItems = [
+      { id: 'plugins',  title: 'Plugins' },
+      { id: 'discover', title: 'Discover' },
+      { id: 'layout',   title: 'Layout' },
+      { id: 'about',    title: 'About' },
+    ];
     return [
       {
         title: 'Options',
-        items: [
-          { id: 'plugins',  title: 'Plugins' },
-          { id: 'discover', title: 'Discover' },
-          { id: 'layout',   title: 'Layout' },
-          { id: 'about',    title: 'About' },
-        ],
+        items: isDemo ? baseItems.filter(x => x.id !== 'discover') : baseItems,
       },
       { title: 'Plugin options', items: pluginItems },
     ];
@@ -3111,6 +3115,46 @@ function pickInitialPane(panes) {
   // page load. See `hydrateServerState` definition above for the
   // shape + per-key sync policy.
   await hydrateServerState();
+  // ─── Demo-mode seed ───
+  // After hydration but before re-applying theme/view: if the daemon
+  // reports demo mode, add `body.ttv-demo` so the Settings sidebar
+  // hides Discover, and on first visit pre-seed pinned tabs +
+  // active view + active theme so the page lands looking populated.
+  // The flag `ttv-demo-seeded` keeps a returning visitor's own
+  // choices intact on re-load.
+  try {
+    const r = await fetch('/api/instance');
+    if (r.ok) {
+      const info = await r.json();
+      if (info && info.demo) {
+        document.body.classList.add('ttv-demo');
+        if (!localStorage.getItem('ttv-demo-seeded')) {
+          localStorage.setItem('ttv-plugin:ttyview-tabs:pins', JSON.stringify([
+            { id: '%demo1', session: 'mobile-cc' },
+            { id: '%demo2', session: 'ttyview-platform' },
+            { id: '%demo3', session: 'tmux-web' },
+            { id: '%demo4', session: 'blog-post-draft' },
+            { id: '%demo5', session: 'feature-experiments' },
+          ]));
+          localStorage.setItem('ttv-plugin:ttyview-tabs:settings',
+            JSON.stringify({ rows: 1, maxPerRow: 5 }));
+          localStorage.setItem('ttv-active-view', 'ttyview-cc');
+          localStorage.setItem('ttv-active-theme', 'ttyview-terminal-green');
+          localStorage.setItem('ttv-last-session', 'mobile-cc');
+          localStorage.setItem('ttv-demo-seeded', '1');
+          // Nudge any plugin that already rendered with empty
+          // localStorage (the pinned-tabs row in particular) to
+          // re-render now that pins / view / theme are in place.
+          // We fire panes-updated since that's the event the tabs
+          // plugin listens to for full re-render.
+          try {
+            window.ttyview._internal.emit('panes-updated',
+              window.ttyview.listPanes());
+          } catch (e) { console.warn('[demo-seed] nudge failed', e); }
+        }
+      }
+    }
+  } catch (e) { console.warn('[demo-seed]', e); }
   // Re-apply theme + view from hydrated localStorage. The earlier
   // synchronous IIFEs (theme auto-apply at ~line 875, active-view
   // restore at ~line 2868) ran with whatever stale values

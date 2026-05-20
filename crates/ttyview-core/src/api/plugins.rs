@@ -319,7 +319,25 @@ async fn install_plugin(
 /// land on a presentable page without any clicks. Best-effort: any
 /// failure logs + falls through (the page still works, just less rich).
 pub async fn demo_install_curated(config_dir: &std::path::Path) -> Result<(), String> {
-    for id in ["ttyview-cc", "ttyview-terminal-green"] {
+    // Full UI-completing set: every visible part of the demo is a
+    // bundled plugin, all pre-installed so visitors don't see a
+    // half-empty page. The demo seed script in index.html sets
+    // ttyview-cc as the active terminal view and ttyview-terminal-
+    // green as the active theme on first visit.
+    let curated = [
+        "ttyview-cc",                 // CC chat terminal view (active by default)
+        "ttyview-tabs",               // pinned tabs row (pre-seeded pins, client-side)
+        "ttyview-quickkeys",          // Esc/Tab/Ctrl-C/arrows row
+        "ttyview-voice-dictation",    // mic button (Web Speech API)
+        "ttyview-image-paste",        // 📷 button + drag-and-drop
+        "ttyview-pane-picker",        // Recent + All sections in the picker
+        "ttyview-app-name",           // app-name header widget
+        "ttyview-display-toggles",    // Settings → Display
+        "ttyview-terminal-green",     // active theme by default
+        "ttyview-solarized-dark",     // alt theme
+        "ttyview-nord",               // alt theme
+    ];
+    for id in curated {
         match install_from_bundle(config_dir, id).await {
             Ok(_) => tracing::info!(target: "ttyview::demo", "auto-installed: {id}"),
             Err(e) => tracing::warn!(target: "ttyview::demo", "auto-install {id}: {e}"),

@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(no unreleased changes yet)_
+### Changed
+
+- **`--demo` mode polish.** Seeds 5 synthetic panes (`mobile-cc`,
+  `ttyview-platform`, `tmux-web`, `blog-post-draft`,
+  `feature-experiments`) instead of one. Curated plugin set
+  auto-installed at startup bumped from 2 → 11 (all UI-completing
+  plugins + all three themes). Five bundled canned CC transcript
+  JSONLs routed by pane id so each pinned tab shows a different
+  conversation. On first visit the page pre-seeds pinned tabs +
+  active theme (Terminal Green) + active view (CC chat). The
+  Discover tab is hidden from Settings in demo (everything is
+  pre-installed). Writes (install / uninstall / sendInput /
+  uploads / sessions) stay 403 / silent-ack — demo is strictly
+  read-only.
 
 ## [0.1.1] — 2026-05-11
 
