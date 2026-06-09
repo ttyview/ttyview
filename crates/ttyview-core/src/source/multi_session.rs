@@ -31,16 +31,29 @@ const EVENT_CHANNEL_CAPACITY: usize = 4096;
 // the daemon was started, while the underlying tmux panes are very much
 // active. This watchdog kills the stuck client; the next reconcile re-attaches.
 //
-// 2026-06-09: raised 180s -> 1800s (30 min). 180s was far too aggressive — an
-// *idle* session legitimately emits no %output, so every quiet session got
-// killed+respawned every 3 minutes, a constant churn of `tmux -C attach`
-// spawns. tmux 3.4 segfaults in its control-mode path under that churn
-// (confirmed via coredumpctl: SIGSEGV in `tmux -C attach -r -t <session>`,
-// taking down the whole server + every session in it). Until tmux is upgraded
-// to 3.5a, minimise the reattach rate; 30 min still catches the multi-hour
-// stuck-client bug. Companion burst-limiter MAX_RESPAWNS_PER_TICK below. Full
-// write-up: ~/.claude/docs/tmux-control-mode-crash.md
-const CLIENT_SILENCE_RESPAWN_AFTER: Duration = Duration::from_secs(1800);
+// 2026-06-09 v2: silence is now measured against RAW STDOUT LINES, and every
+// client gets a keepalive probe (TmuxControl SpawnOpts): a no-op command down
+// stdin every KEEPALIVE_INTERVAL, answered by a %begin/%end block that bumps
+// the line-level timestamp. A healthy client is never silent longer than
+// ~KEEPALIVE_INTERVAL even when its session is idle — so silence past this
+// threshold genuinely means a wedged client, and respawning is always correct.
+//
+// History: the first version measured parsed-event silence at 180s; idle
+// sessions emit no events, so every quiet session was kill+respawned every
+// 3 min — and that `tmux -C attach` churn crashed tmux 3.4
+// (coredumpctl-confirmed SIGSEGV in control_write() during %client-detached
+// fan-out, control.c:414). An interim 1800s bump cut churn 10x but idle
+// clients re-synced into 30-min respawn waves. The keepalive removes
+// healthy-client churn entirely; this threshold (2.5 missed probes) only
+// fires for genuinely-dead clients.
+// Full write-up: ~/.claude/docs/tmux-control-mode-crash.md
+const CLIENT_SILENCE_RESPAWN_AFTER: Duration = Duration::from_secs(300);
+// How often the keepalive no-op is written to each control client's stdin.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+// Minimum gap between consecutive `tmux -C attach` spawns within one
+// reconcile pass — back-to-back control-mode attach/detach is the danger
+// window for the tmux 3.4 notification-race crash.
+const ATTACH_STAGGER: Duration = Duration::from_millis(250);
 // Cap kill-for-respawn to 1 session per reconcile tick so we never fire a burst
 // of concurrent control-mode attaches (the worst case for the tmux 3.4 crash —
 // it died mid-burst with two reattaches in the same second). Backlog drains
@@ -200,14 +213,21 @@ async fn reconcile_once(
         have.remove(&s);
     }
 
-    // Attach new sessions.
+    // Attach new sessions, staggered — a back-to-back burst of control-mode
+    // attaches (daemon startup, post-crash restore) is the danger window for
+    // the tmux 3.4 notification-race crash.
+    let mut attached_this_pass = false;
     for s in &want {
         if have.contains_key(s) {
             continue;
         }
+        if attached_this_pass {
+            tokio::time::sleep(ATTACH_STAGGER).await;
+        }
         match attach_session(socket, s, tx.clone(), sessions.clone(), store.as_ref()).await {
             Ok(handle) => {
                 have.insert(s.clone(), handle);
+                attached_this_pass = true;
             }
             Err(e) => warn!("multi-session: attach {s} failed: {e}"),
         }
@@ -326,12 +346,17 @@ async fn attach_session(
     info!(
         "multi-session: attaching to session {session} panes={pane_count} seeded_via_store={seeded}"
     );
+    let last_event_at = Arc::new(Mutex::new(Instant::now()));
     let (ctrl, mut rx) = TmuxControl::spawn_with(SpawnOpts {
         socket_name: socket.map(String::from),
         target_session: Some(session.to_string()),
+        // Same Arc as the watchdog's last_event_at: raw stdout lines
+        // (incl. keepalive %begin/%end replies) count as liveness, so
+        // the silence watchdog only fires on genuinely-wedged clients.
+        line_seen_at: Some(last_event_at.clone()),
+        keepalive: Some(KEEPALIVE_INTERVAL),
     })?;
     let session_name = session.to_string();
-    let last_event_at = Arc::new(Mutex::new(Instant::now()));
     let last_event_at_fwd = last_event_at.clone();
     let sessions_for_fwd = sessions.clone();
     let forwarder = tokio::spawn(async move {

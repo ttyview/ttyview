@@ -10,9 +10,11 @@ use super::{PaneId, SourceEvent};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
 pub struct TmuxControl {
@@ -23,6 +25,24 @@ pub struct TmuxControl {
 pub struct SpawnOpts {
     pub socket_name: Option<String>,
     pub target_session: Option<String>,
+    /// Raw-line liveness timestamp: bumped on EVERY stdout line, including
+    /// `%begin`/`%end` protocol lines that produce no SourceEvent. This is
+    /// what makes the keepalive probe (below) work — the probe's reply is a
+    /// bare %begin/%end block, invisible at the event level but visible here.
+    /// MultiSession points this at the same Arc as its `last_event_at` so
+    /// "silence" means "no bytes at all", not "no parsed events".
+    pub line_seen_at: Option<Arc<Mutex<Instant>>>,
+    /// When set, spawn a writer task that sends a no-op control-mode command
+    /// down the client's stdin every interval. tmux replies to any command
+    /// with a %begin/%end block, so a HEALTHY client produces stdout lines at
+    /// least this often even when the attached session is completely idle.
+    /// Combined with `line_seen_at`, the multi-session watchdog can then
+    /// distinguish "idle session" (probe answered) from "wedged client"
+    /// (probe unanswered — respawn). The previous output-silence heuristic
+    /// couldn't, and its respawn churn crashed tmux 3.4 (SIGSEGV in
+    /// control_write during %client-detached fan-out — see
+    /// ~/.claude/docs/tmux-control-mode-crash.md).
+    pub keepalive: Option<Duration>,
 }
 
 impl TmuxControl {
@@ -59,6 +79,33 @@ impl TmuxControl {
         let stdout = child.stdout.take().context("tmux stdout missing")?;
         let stderr = child.stderr.take().context("tmux stderr missing")?;
 
+        // Keepalive writer — see SpawnOpts::keepalive. Owns the child's
+        // stdin; exits on first write error (client killed / tmux gone).
+        if let Some(interval) = opts.keepalive {
+            if let Some(mut stdin) = child.stdin.take() {
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(interval).await;
+                        // Cheapest observable no-op: the reply rides inside
+                        // the %begin/%end block (swallowed by parse_line's
+                        // in_command_response handling), so it never surfaces
+                        // as a SourceEvent — it only refreshes the raw-line
+                        // liveness timestamp.
+                        if stdin
+                            .write_all(b"display-message -p ttyview-keepalive\n")
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if stdin.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+
         let (tx, rx) = mpsc::channel(1024);
 
         // stderr just gets logged.
@@ -70,6 +117,7 @@ impl TmuxControl {
         });
 
         // stdout drives the event stream.
+        let line_seen_at = opts.line_seen_at.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             let mut in_command_response = false;
@@ -93,6 +141,16 @@ impl TmuxControl {
                         break;
                     }
                 };
+                // Raw-line liveness timestamp — bumped on EVERY line so the
+                // keepalive probe's %begin/%end reply counts as activity.
+                // try_lock: a missed bump under contention is harmless (the
+                // next line bumps), and we keep the hot read loop lock-wait
+                // free.
+                if let Some(ts) = &line_seen_at {
+                    if let Ok(mut guard) = ts.try_lock() {
+                        *guard = Instant::now();
+                    }
+                }
                 for ev in parse_line(&line, &mut in_command_response) {
                     if tx.send(ev).await.is_err() {
                         return;

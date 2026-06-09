@@ -48,6 +48,7 @@ pub async fn run(
     let (_tmux, mut rx) = TmuxControl::spawn_with(SpawnOpts {
         socket_name: socket.map(String::from),
         target_session: None,
+        ..Default::default()
     })
     .context("spawning tmux -C")?;
 
