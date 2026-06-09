@@ -48,16 +48,28 @@ pub struct InstanceInfo {
     pub demo: bool,
     /// Whether the daemon was started in --read-only mode.
     pub read_only: bool,
+    /// URL path of a PWA manifest, when the embedder provided one via
+    /// `RunOptions.extra_static`. The web client injects
+    /// `<link rel="manifest">` pointing here. Omitted for the bare daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_url: Option<String>,
+    /// URL path of a service worker, when provided. The web client
+    /// registers it on boot. Omitted for the bare daemon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_worker_url: Option<String>,
 }
 
 /// Daemon-instance metadata. Used by the bundled ttyview-app-name plugin
 /// to render the app name in the header. Other plugins are welcome to
 /// read it for similar surfacing (e.g. demo / read-only banners).
 async fn get_instance(State(app): State<Arc<AppState>>) -> Json<InstanceInfo> {
+    let has = |p: &str| app.extra_static.contains_key(p).then(|| p.to_string());
     Json(InstanceInfo {
         name: app.app_name.clone(),
         demo: app.demo_mode,
         read_only: app.read_only,
+        manifest_url: has("/manifest.webmanifest"),
+        service_worker_url: has("/sw.js"),
     })
 }
 

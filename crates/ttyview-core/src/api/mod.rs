@@ -90,6 +90,12 @@ pub struct AppState {
     /// daemon hydrates from here on boot, so the layout is uniform
     /// regardless of localStorage contents.
     pub state: Arc<state::StateStore>,
+    /// Embedder-provided static assets keyed by absolute URL path
+    /// (e.g. `/manifest.webmanifest`, `/sw.js`, `/pwa/icons/...`).
+    /// Served by the router's fallback handler; `GET /api/instance`
+    /// advertises manifest/SW presence so the web client can wire up
+    /// PWA installability. Empty for the bare daemon.
+    pub extra_static: Arc<HashMap<String, Vec<u8>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -106,7 +112,44 @@ pub fn router(state: AppState) -> Router {
         .merge(sessions::routes())
         .merge(state::routes())
         .merge(static_routes())
+        // Embedder-provided assets (PWA manifest / SW / icons) live at
+        // arbitrary absolute paths, so they're served by the fallback
+        // rather than per-path routes. 404 for anything not provided —
+        // same behavior as before this hook existed.
+        .fallback(axum::routing::get(serve_extra_static))
         .with_state(Arc::new(state))
+}
+
+/// Serve an embedder-provided static asset (see `AppState.extra_static`).
+async fn serve_extra_static(
+    axum::extract::State(app): axum::extract::State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    match app.extra_static.get(uri.path()) {
+        Some(bytes) => {
+            // mime_guess doesn't know .webmanifest; everything else
+            // (js, png, json) resolves normally.
+            let ct = if uri.path().ends_with(".webmanifest") {
+                "application/manifest+json".to_string()
+            } else {
+                mime_guess::from_path(uri.path())
+                    .first_or_octet_stream()
+                    .as_ref()
+                    .to_string()
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, ct.as_str()),
+                    (header::CACHE_CONTROL, "no-store, must-revalidate"),
+                ],
+                bytes.clone(),
+            )
+                .into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Static file serving for the embedded UI bundle (`ui/` dir, embedded at

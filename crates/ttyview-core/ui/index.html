@@ -3191,6 +3191,23 @@ function pickInitialPane(panes) {
           } catch (e) { console.warn('[demo-seed] nudge failed', e); }
         }
       }
+      // PWA wiring — embedders (mobile-cc) ship a manifest + service
+      // worker via RunOptions.extra_static and the daemon advertises
+      // them here. The bare ttyview daemon serves neither, so this is
+      // a no-op for it. Injecting the manifest link dynamically is
+      // enough for Chrome's install prompt.
+      try {
+        if (info && info.manifest_url && !document.querySelector('link[rel="manifest"]')) {
+          const l = document.createElement('link');
+          l.rel = 'manifest';
+          l.href = info.manifest_url;
+          document.head.appendChild(l);
+        }
+        if (info && info.service_worker_url && navigator.serviceWorker) {
+          navigator.serviceWorker.register(info.service_worker_url)
+            .catch(function(e) { console.warn('[ttyview] SW registration failed', e); });
+        }
+      } catch (e) { console.warn('[ttyview] PWA wiring failed', e); }
     }
   } catch (e) { console.warn('[demo-seed]', e); }
   // Re-apply theme + view from hydrated localStorage. The earlier

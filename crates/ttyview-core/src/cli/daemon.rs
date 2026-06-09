@@ -66,6 +66,16 @@ pub struct RunOptions {
     /// `--allow-origin` flag (mobile-cc, the sandbox broker's
     /// per-session daemon) pass `Vec::new()`.
     pub allowed_origins: Vec<String>,
+    /// Extra static assets to serve, keyed by absolute URL path —
+    /// e.g. `("/manifest.webmanifest", bytes)`, `("/sw.js", bytes)`,
+    /// `("/pwa/icons/icon-192.png", bytes)`. Lets embedders
+    /// (mobile-cc) ship a PWA manifest / service worker / icons
+    /// without forking the UI bundle. When a `/manifest.webmanifest`
+    /// or `/sw.js` entry is present, `GET /api/instance` advertises
+    /// it and the web client wires up the manifest link / SW
+    /// registration. Paths must start with `/`. Empty = no extra
+    /// routes (the bare-daemon default).
+    pub extra_static: Vec<(String, Vec<u8>)>,
 }
 
 /// Defaults are intentionally conservative: loopback bind, no TLS, no
@@ -90,6 +100,7 @@ impl Default for RunOptions {
             app_name: None,
             uploads_dir: None,
             allowed_origins: Vec::new(),
+            extra_static: Vec::new(),
         }
     }
 }
@@ -123,6 +134,7 @@ pub async fn run_with_options(
         app_name: None,
         uploads_dir: None,
         allowed_origins: Vec::new(),
+        extra_static: Vec::new(),
     }).await
 }
 
@@ -131,7 +143,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
         demo_mode, read_only, config_dir, app_name, uploads_dir,
-        allowed_origins,
+        allowed_origins, extra_static,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -302,6 +314,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         uploads: uploads_state,
         allowed_origins,
         state: state_store,
+        extra_static: std::sync::Arc::new(extra_static.into_iter().collect()),
     });
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {

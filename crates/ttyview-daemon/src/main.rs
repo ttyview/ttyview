@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         app_name: cli.app_name.clone(),
         uploads_dir: cli.uploads_dir.clone(),
         allowed_origins: cli.allow_origin.clone(),
+        extra_static: Vec::new(),
     })
     .await
 }
