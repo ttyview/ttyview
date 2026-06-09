@@ -30,7 +30,22 @@ const EVENT_CHANNEL_CAPACITY: usize = 4096;
 // alive — symptom: idle_ms grows to 4h+ across every session at the same time
 // the daemon was started, while the underlying tmux panes are very much
 // active. This watchdog kills the stuck client; the next reconcile re-attaches.
-const CLIENT_SILENCE_RESPAWN_AFTER: Duration = Duration::from_secs(180);
+//
+// 2026-06-09: raised 180s -> 1800s (30 min). 180s was far too aggressive — an
+// *idle* session legitimately emits no %output, so every quiet session got
+// killed+respawned every 3 minutes, a constant churn of `tmux -C attach`
+// spawns. tmux 3.4 segfaults in its control-mode path under that churn
+// (confirmed via coredumpctl: SIGSEGV in `tmux -C attach -r -t <session>`,
+// taking down the whole server + every session in it). Until tmux is upgraded
+// to 3.5a, minimise the reattach rate; 30 min still catches the multi-hour
+// stuck-client bug. Companion burst-limiter MAX_RESPAWNS_PER_TICK below. Full
+// write-up: ~/.claude/docs/tmux-control-mode-crash.md
+const CLIENT_SILENCE_RESPAWN_AFTER: Duration = Duration::from_secs(1800);
+// Cap kill-for-respawn to 1 session per reconcile tick so we never fire a burst
+// of concurrent control-mode attaches (the worst case for the tmux 3.4 crash —
+// it died mid-burst with two reattaches in the same second). Backlog drains
+// over successive ticks.
+const MAX_RESPAWNS_PER_TICK: usize = 1;
 
 /// Owns one `tmux -C attach -r -t <S>` per active session and forwards all
 /// their `SourceEvent`s into a single channel. Reconciles automatically.
@@ -169,7 +184,10 @@ async fn reconcile_once(
             stuck.push(s.clone());
         }
     }
-    for s in stuck {
+    // Respawn at most MAX_RESPAWNS_PER_TICK per tick to avoid bursting
+    // concurrent control-mode attaches. Remaining stuck clients are caught on
+    // the next reconcile tick (RECONCILE_INTERVAL later).
+    for s in stuck.into_iter().take(MAX_RESPAWNS_PER_TICK) {
         let secs = have
             .get(&s)
             .map(|h| now.duration_since(*h.last_event_at.try_lock().unwrap()).as_secs())
