@@ -99,12 +99,17 @@
         const time = document.createElement('span');
         time.textContent = fmtTime(t.timestamp);
         if (t.type === 'user' && t.message) {
+          // Tool results / interrupted turns come through as user
+          // entries with no text content — rendering them as "(empty)"
+          // bubbles is pure noise on a phone. Skip them.
+          const text = asText(t.message.content);
+          if (!text) return null;
           div.className = 'ccv-turn ccv-user';
           role.textContent = 'user';
           meta.appendChild(role); meta.appendChild(time);
           div.appendChild(meta);
           const body = document.createElement('div');
-          body.textContent = asText(t.message.content) || '(empty)';
+          body.textContent = text;
           div.appendChild(body);
         } else if (t.type === 'assistant' && t.message) {
           div.className = 'ccv-turn ccv-assistant';
@@ -149,12 +154,9 @@
             tdiv.appendChild(summary);
             div.appendChild(tdiv);
           }
-          if (!text && tools.length === 0 && thinking.length === 0) {
-            const body = document.createElement('div');
-            body.textContent = '(no rendered content)';
-            body.style.color = 'var(--ttv-muted)';
-            div.appendChild(body);
-          }
+          // Nothing renderable (e.g. a turn that was only tool
+          // results routed elsewhere) — skip the bubble entirely.
+          if (!text && tools.length === 0 && thinking.length === 0) return null;
         } else {
           // Other types (system, file-history-snapshot, last-prompt,
           // permission-mode, …) — collapse to a one-liner so the user
@@ -180,9 +182,30 @@
         try {
           const r = await fetch('/panes/' + encodeURIComponent(pane.id) + '/cc-transcript?tail=300');
           if (!r.ok) {
-            const txt = await r.text().catch(function() { return ''; });
-            $status.textContent = 'Not a CC pane (' + r.status + '): ' + txt;
+            // Not a CC pane (plain shell, vim, top, …). Offer a
+            // one-tap switch to the terminal renderer instead of a
+            // raw error string. The switch is apply-only
+            // (persist:false): the user's saved view preference stays
+            // ttyview-cc, so CC panes still open in chat view.
+            $status.textContent = 'Not a Claude Code pane';
             $list.innerHTML = '';
+            const panel = document.createElement('div');
+            panel.className = 'ccv-empty';
+            panel.style.cssText = 'display:flex;flex-direction:column;gap:10px;align-items:flex-start;';
+            const msg = document.createElement('div');
+            msg.textContent = 'This pane isn’t running Claude Code, so there’s no transcript to show.';
+            panel.appendChild(msg);
+            const btn = document.createElement('button');
+            btn.textContent = 'Show terminal instead';
+            btn.style.cssText = 'padding:8px 14px;border-radius:6px;border:1px solid var(--ttv-muted);' +
+              'background:var(--ttv-bg-elev);color:var(--ttv-fg);font:inherit;cursor:pointer;';
+            btn.addEventListener('click', function() {
+              try {
+                tv._internal.setActiveTerminalViewId('cell-grid', { persist: false });
+              } catch (e) { console.warn('[ttyview-cc] view switch failed', e); }
+            });
+            panel.appendChild(btn);
+            $list.appendChild(panel);
             return;
           }
           const data = await r.json();

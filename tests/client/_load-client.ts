@@ -18,6 +18,8 @@ export interface ClientHarness {
   document: Document;
   /** WS frames the client has sent (parsed JSON). */
   wsSent: any[];
+  /** Every fetch the client issued: method, path (no origin), parsed body if JSON. */
+  fetchCalls: Array<{ method: string; path: string; body?: any }>;
   /** Push a server frame into the client's onmessage handler. */
   recvWs: (msg: any) => void;
   /** Resolve the next fetch with this JSON. */
@@ -63,8 +65,20 @@ export async function loadClient(initialFetches: Record<string, any> = {}): Prom
   for (const [path, body] of Object.entries(initialFetches)) {
     fetchOverrides.set(path, { body, status: 200 });
   }
-  (win as any).fetch = async (url: string) => {
+  const fetchCalls: Array<{ method: string; path: string; body?: any }> = [];
+  (win as any).fetch = async (url: string, init?: any) => {
     const rawPath = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0];
+    {
+      let parsedBody: any = undefined;
+      if (init && typeof init.body === 'string') {
+        try { parsedBody = JSON.parse(init.body); } catch { parsedBody = init.body; }
+      }
+      fetchCalls.push({
+        method: (init && init.method) || 'GET',
+        path: decodeURIComponent(rawPath),
+        body: parsedBody,
+      });
+    }
     // Try multiple lookup keys: raw, decoded, fully-encoded.
     // Client encodes pane ids via encodeURIComponent (so %1 becomes
     // %251 in the URL) but tests usually want to write fixtures
@@ -122,6 +136,7 @@ export async function loadClient(initialFetches: Record<string, any> = {}): Prom
     window: win,
     document: doc as unknown as Document,
     wsSent,
+    fetchCalls,
     recvWs: (msg) => onMessage?.({ data: JSON.stringify(msg) }),
     setFetchResponse: (path, body, status = 200) => {
       fetchOverrides.set(path, { body, status });

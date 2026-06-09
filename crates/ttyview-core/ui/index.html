@@ -656,6 +656,13 @@ const __serverState = {
     'ttv-active-view',
     'ttv-active-theme',
   ]),
+  // Keys whose localStorage representation is the raw string (read
+  // via plain getItem + registry .has(id)), NOT JSON. Hydration must
+  // not JSON.stringify these.
+  rawKeys: new Set([
+    'ttv-active-view',
+    'ttv-active-theme',
+  ]),
   // Prefix-based opt-in: every key starting with one of these
   // also syncs. Lets us migrate whole plugin namespaces at once
   // without naming every key.
@@ -740,9 +747,15 @@ async function hydrateServerState() {
     if (!__serverStateShouldSync(k)) continue;
     try {
       // Server stores parsed JSON; localStorage stores strings.
-      // JSON.stringify it back so `pluginStorage.get` (which
-      // JSON.parses) gets the right value.
-      localStorage.setItem(k, JSON.stringify(keys[k]));
+      // Plugin-storage keys are JSON.parsed on read, so stringify
+      // them back. The bare keys (ttv-active-view / ttv-active-theme)
+      // are read and written RAW by the setters — stringifying them
+      // here would produce '"ttyview-cc"' which never matches a
+      // registry id and silently breaks server→client view/theme
+      // sync (bug found 2026-06-10).
+      const v = keys[k];
+      const storeRaw = __serverState.rawKeys.has(k) && typeof v === 'string';
+      localStorage.setItem(k, storeRaw ? v : JSON.stringify(v));
     } catch {}
   }
   if (typeof ttvDiag === 'function') {
@@ -924,17 +937,26 @@ window.ttyview = (function() {
       registries: registries,
       emit: emit,
       getActiveThemeId: function() { return activeThemeId; },
-      setActiveThemeId: function(id) {
+      // opts.persist === false → apply-only: don't write localStorage
+      // or PUT /api/state. Used by every boot/restore path (the value
+      // came FROM storage or the server, so persisting it back is at
+      // best an echo and at worst — before hydration completes — a
+      // clobber of another device's choice). User actions (settings
+      // UI, command palette) omit opts and persist as before.
+      setActiveThemeId: function(id, opts) {
+        const persist = !(opts && opts.persist === false);
         activeThemeId = id || null;
-        try {
-          if (id) localStorage.setItem('ttv-active-theme', id);
-          else localStorage.removeItem('ttv-active-theme');
-        } catch {}
-        // Sync to server so every browser sees the same active theme.
-        try {
-          if (id) __serverStatePut('ttv-active-theme', id);
-          else __serverStateDelete('ttv-active-theme');
-        } catch {}
+        if (persist) {
+          try {
+            if (id) localStorage.setItem('ttv-active-theme', id);
+            else localStorage.removeItem('ttv-active-theme');
+          } catch {}
+          // Sync to server so every browser sees the same active theme.
+          try {
+            if (id) __serverStatePut('ttv-active-theme', id);
+            else __serverStateDelete('ttv-active-theme');
+          } catch {}
+        }
         if (!id) { applyThemeVars(null); emit('theme-activated', { id: null }); return; }
         const def = registries.theme.get(id);
         applyThemeVars(def && def.vars);
@@ -944,7 +966,9 @@ window.ttyview = (function() {
       // Mount the plugin's render(host, ctx). Unmounts the previous
       // active view first if any. Errors during mount are caught
       // and logged so a buggy plugin can't crash the whole platform.
-      setActiveTerminalViewId: function(id) {
+      // Same opts.persist contract as setActiveThemeId above.
+      setActiveTerminalViewId: function(id, opts) {
+        const persist = !(opts && opts.persist === false);
         if (activeTerminalViewUnmount) {
           try { activeTerminalViewUnmount(); }
           catch (e) { console.error('terminal-view unmount threw', e); }
@@ -953,15 +977,17 @@ window.ttyview = (function() {
         // Empty the host so the new plugin starts from a clean slate.
         if ($host) $host.innerHTML = '';
         activeTerminalViewId = id;
-        try {
-          if (id) localStorage.setItem('ttv-active-view', id);
-          else localStorage.removeItem('ttv-active-view');
-        } catch {}
-        // Sync to server so every browser sees the same active view.
-        try {
-          if (id) __serverStatePut('ttv-active-view', id);
-          else __serverStateDelete('ttv-active-view');
-        } catch {}
+        if (persist) {
+          try {
+            if (id) localStorage.setItem('ttv-active-view', id);
+            else localStorage.removeItem('ttv-active-view');
+          } catch {}
+          // Sync to server so every browser sees the same active view.
+          try {
+            if (id) __serverStatePut('ttv-active-view', id);
+            else __serverStateDelete('ttv-active-view');
+          } catch {}
+        }
         if (!id) return;
         const def = registries.terminalView.get(id);
         if (!def || typeof def.render !== 'function') {
@@ -996,14 +1022,19 @@ window.ttyview = (function() {
 (function() {
   let savedId = null;
   try { savedId = localStorage.getItem('ttv-active-theme'); } catch {}
-  if (!savedId) return;
-  // If already registered (e.g. bundled), apply immediately.
-  if (window.ttyview._internal.registries.theme.has(savedId)) {
-    window.ttyview._internal.setActiveThemeId(savedId);
+  if (savedId && window.ttyview._internal.registries.theme.has(savedId)) {
+    // Already registered (e.g. bundled) — apply immediately.
+    // persist:false — restoring, not choosing.
+    window.ttyview._internal.setActiveThemeId(savedId, { persist: false });
   }
   window.ttyview.on('theme-registered', function(def) {
-    if (def && def.id === savedId) {
-      window.ttyview._internal.setActiveThemeId(savedId);
+    // Re-read at fire time: plugins register AFTER hydrateServerState
+    // has overwritten localStorage, so the parse-time value may be
+    // stale (it would clobber the server-chosen theme otherwise).
+    let want = null;
+    try { want = localStorage.getItem('ttv-active-theme'); } catch {}
+    if (def && want && def.id === want) {
+      window.ttyview._internal.setActiveThemeId(want, { persist: false });
     }
   });
 })();
@@ -2997,20 +3028,27 @@ window.ttyview.contributes.terminalView({
   let saved = null;
   try { saved = localStorage.getItem('ttv-active-view'); } catch {}
   const tv = window.ttyview;
+  // persist:false on every call here — this is restore/fallback, not a
+  // user choice. Persisting the cell-grid fallback used to PUT it to
+  // /api/state before hydration finished, so merely opening the page
+  // in a fresh browser reset the server-saved view for every device.
   if (saved && tv._internal.registries.terminalView.has(saved)) {
-    tv._internal.setActiveTerminalViewId(saved);
+    tv._internal.setActiveTerminalViewId(saved, { persist: false });
   } else {
-    tv._internal.setActiveTerminalViewId('cell-grid');
-    if (saved) {
-      // Saved id refers to a plugin not yet loaded — switch when it does.
-      const off = tv.on('terminalView-registered', function(def) {
-        if (def && def.id === saved) {
-          tv._internal.setActiveTerminalViewId(saved);
-          off();
-        }
-      });
-    }
+    tv._internal.setActiveTerminalViewId('cell-grid', { persist: false });
   }
+  // A saved id may refer to a plugin not yet loaded — community plugins
+  // eval after this point. Re-read at fire time (not the parse-time
+  // `saved`): hydrateServerState overwrites localStorage before plugins
+  // load, so the captured value may be stale.
+  tv.on('terminalView-registered', function(def) {
+    let want = null;
+    try { want = localStorage.getItem('ttv-active-view'); } catch {}
+    if (def && want && def.id === want
+        && tv._internal.getActiveTerminalViewId() !== want) {
+      tv._internal.setActiveTerminalViewId(want, { persist: false });
+    }
+  });
 })();
 
 // === Input handling ===
@@ -3162,13 +3200,16 @@ function pickInitialPane(panes) {
   // overwritten those, replay the same logic so the visible UI
   // matches the server state.
   try {
+    // persist:false — these values just came FROM the server; PUTing
+    // them back is a pointless echo.
     const themeId = localStorage.getItem('ttv-active-theme');
     if (themeId && window.ttyview._internal.registries.theme.has(themeId)) {
-      window.ttyview._internal.setActiveThemeId(themeId);
+      window.ttyview._internal.setActiveThemeId(themeId, { persist: false });
     }
     const viewId = localStorage.getItem('ttv-active-view');
-    if (viewId && window.ttyview._internal.registries.terminalView.has(viewId)) {
-      window.ttyview._internal.setActiveTerminalViewId(viewId);
+    if (viewId && window.ttyview._internal.registries.terminalView.has(viewId)
+        && window.ttyview._internal.getActiveTerminalViewId() !== viewId) {
+      window.ttyview._internal.setActiveTerminalViewId(viewId, { persist: false });
     }
   } catch (e) {
     console.warn('[ttyview] post-hydrate re-apply threw', e);
