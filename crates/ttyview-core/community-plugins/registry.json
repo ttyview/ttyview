@@ -135,6 +135,15 @@
       "author": "ttyview",
       "kind": "settingsTab",
       "source": "ttyview-session-manager.js"
+    },
+    {
+      "id": "ttyview-stt",
+      "name": "Voice Input",
+      "description": "Dictate into the message input via the browser's Web Speech API. Mic button in the input row; tap to start/stop, interim results preview live in the textarea.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "inputAccessory",
+      "source": "ttyview-stt.js"
     }
   ]
 }
