@@ -1551,6 +1551,13 @@ function connectWs() {
     ttvDiag('ws', { ev: 'open', pane: activePaneId });
     if (activePaneId) {
       ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
+      // Resync the grid: cell-diffs are deltas, and anything emitted
+      // while we were disconnected (daemon restart, mobile background)
+      // is gone — without a refetch the pane stays frozen at the last
+      // pre-drop frame while the status dot reads "connected".
+      // (2026-06-11 stuck-session bug: daemon redeploys left the
+      // phone's pane frozen exactly this way.)
+      loadGrid(activePaneId);
     }
   };
   ws.onmessage = function(ev) {
@@ -1595,6 +1602,25 @@ function connectWs() {
       try { window.ttyview._internal.emit('scrollback-append', msg); } catch (e) {
         console.error('scrollback-append handler threw', e);
       }
+    } else if (msg.t === 'closed') {
+      // The daemon evicted this pane's slot; our subscription died with
+      // it. If the pane comes back under the same id (tmux still alive,
+      // daemon re-attached), it gets a NEW broadcast channel — a fresh
+      // sub is mandatory. Wait a beat for the daemon to rediscover,
+      // then re-sub + refetch. Previously this message was silently
+      // ignored → frozen pane with a green "connected" dot.
+      ttvDiag('pane-closed', { pane: msg.p });
+      setStatus('pane closed — resyncing…', 'error');
+      const closedPane = msg.p;
+      setTimeout(function() {
+        if (activePaneId !== closedPane) return;       // user moved on
+        if (!ws || ws.readyState !== WebSocket.OPEN) return; // reconnect path handles it
+        ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
+        loadGrid(activePaneId);
+        loadPanes();
+        setStatus('connected', 'connected');
+        ttvDiag('pane-closed-resub', { pane: closedPane });
+      }, 1500);
     }
   };
   ws.onclose = function(ev) {

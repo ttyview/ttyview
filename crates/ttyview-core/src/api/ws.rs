@@ -269,9 +269,36 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                             }
                             Err(broadcast::error::TryRecvError::Empty) => break,
                             Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                                warn!("ws subscriber lagged by {n}; consider re-snapshotting");
+                                // Events were dropped (typical: a backgrounded
+                                // phone stopped draining while the pane was
+                                // busy). Cell-diffs are deltas — the client's
+                                // grid is now silently wrong. Tell it to
+                                // refetch instead of letting it drift.
+                                warn!("ws subscriber lagged by {n}; sending grid-reset to resync");
+                                let reset = LiveEvent::GridReset {
+                                    pane: _pane.0.clone(),
+                                    alt: false,
+                                };
+                                let json = serde_json::to_string(&reset).unwrap_or_default();
+                                if sender.send(Message::Text(json)).await.is_err() {
+                                    break 'conn;
+                                }
                             }
                             Err(broadcast::error::TryRecvError::Closed) => {
+                                // The pane's slot was dropped (evict_stale —
+                                // tmux server restart minting new ids). The
+                                // broadcast Closed event may itself have been
+                                // lost to lag, so tell the client explicitly;
+                                // it re-subs + refetches (a recreated pane
+                                // under the same id gets a NEW channel, so a
+                                // fresh sub is required either way).
+                                let closed = LiveEvent::Closed {
+                                    pane: _pane.0.clone(),
+                                };
+                                let json = serde_json::to_string(&closed).unwrap_or_default();
+                                if sender.send(Message::Text(json)).await.is_err() {
+                                    break 'conn;
+                                }
                                 to_remove.push(i);
                                 break;
                             }
