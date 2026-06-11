@@ -388,11 +388,14 @@
   tv.contributes.inputAccessory({
     id: 'ttyview-image-paste',
     name: 'Image Paste',
+    // Compact, always-needed → lives in the input row itself (left of
+    // the textarea, the tmux-web arrangement) instead of its own row.
+    preferredSlot: 'input-left',
     render: function(slot) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.tabIndex = -1;                  // don't blur the textarea
-      btn.textContent = '📷';
+      btn.textContent = '🖼';
       btn.title = 'Attach image (paste or drop also work)';
       btn.addEventListener('pointerup', function(e) {
         if (e.button !== undefined && e.button !== 0) return;
