@@ -16,7 +16,7 @@
     --ttv-bg-elev: #0d0d0d;
     --ttv-bg-elev2: #1a1a1a;
     --ttv-border: #2a2a2a;
-    --ttv-accent: #6ed29a;
+    --ttv-accent: #569cd6;
     --ttv-muted: #888;
   }
   * { box-sizing: border-box; }
@@ -466,20 +466,20 @@
     line-height: 1.4;
     outline: none;
   }
-  #input-row textarea:focus { border-color: #4ec9b0; }
+  #input-row textarea:focus { border-color: var(--ttv-accent); }
   #input-row textarea::placeholder { color: #666; }
   #send-btn {
     flex: none;
     min-height: 36px;
     padding: 0 14px;
-    background: #4ec9b0;
+    background: var(--ttv-accent);
     color: var(--ttv-bg-elev);
     border: none;
     border-radius: 6px;
     font-weight: 600;
     cursor: pointer;
   }
-  #send-btn:hover { background: #5fdac1; }
+  #send-btn:hover { filter: brightness(1.15); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   /* In-row slots: no chrome of their own (the row provides it);
      buttons sized to match the textarea's 36px min-height. */
@@ -2611,7 +2611,7 @@ async function setPluginEnabled(id, enabled) {
       'ttyview is a thin platform for terminal-pane viewing. ' +
       'Everything user-facing is a plugin: terminal views, themes, ' +
       'correlators, commands. ' +
-      '<a href="https://github.com/ttyview" style="color:#6ed29a">github.com/ttyview</a>';
+      '<a href="https://github.com/ttyview" style="color:var(--ttv-accent)">github.com/ttyview</a>';
     el.appendChild(note);
   }
 

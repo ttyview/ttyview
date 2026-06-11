@@ -274,7 +274,7 @@
         background:rgba(0,0,0,.5);
       }
       .ttv-img-thumb .ttv-img-bar-fill {
-        height:100%; background:#4ec9b0; transition:width .1s linear;
+        height:100%; background:var(--ttv-accent); transition:width .1s linear;
       }
       .ttv-img-thumb.is-done .ttv-img-bar,
       .ttv-img-thumb.is-error .ttv-img-bar { display:none; }
@@ -284,8 +284,8 @@
       }
       #ttv-img-drop-overlay {
         position:fixed; inset:0; display:none; align-items:center; justify-content:center;
-        background:rgba(0,0,0,.55); color:#4ec9b0; font: 600 22px system-ui, sans-serif;
-        pointer-events:none; z-index:99999; border:3px dashed #4ec9b0;
+        background:rgba(0,0,0,.55); color:var(--ttv-accent); font: 600 22px system-ui, sans-serif;
+        pointer-events:none; z-index:99999; border:3px dashed var(--ttv-accent);
       }
       .ttv-img-toast {
         position:fixed; left:50%; bottom:120px; transform:translateX(-50%);

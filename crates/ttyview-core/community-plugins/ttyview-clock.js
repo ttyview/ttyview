@@ -15,7 +15,7 @@
     name: 'Clock',
     render: function(slot) {
       const span = document.createElement('span');
-      span.style.cssText = 'font-variant-numeric:tabular-nums;color:#6ed29a;font-size:11px;padding:0 6px;';
+      span.style.cssText = 'font-variant-numeric:tabular-nums;color:var(--ttv-accent);font-size:11px;padding:0 6px;';
       slot.appendChild(span);
       function tick() {
         const d = new Date();
