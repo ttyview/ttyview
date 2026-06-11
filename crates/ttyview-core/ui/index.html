@@ -811,13 +811,35 @@ window.ttyview = (function() {
     // stale overrides — :root defaults from the stylesheet take over
     // whenever a theme doesn't set a particular var.
     for (const v of THEME_VARS) root.removeProperty(v);
-    if (!vars) return;
-    for (const [k, val] of Object.entries(vars)) {
-      if (THEME_VARS.has(k) && typeof val === 'string') {
-        root.setProperty(k, val);
+    if (vars) {
+      for (const [k, val] of Object.entries(vars)) {
+        if (THEME_VARS.has(k) && typeof val === 'string') {
+          root.setProperty(k, val);
+        }
       }
     }
+    syncMetaThemeColor();
   }
+  // Keep the browser/OS chrome (Android status bar in installed PWAs,
+  // mobile Chrome's URL bar) matching the app header. The header uses
+  // --ttv-bg-elev, so the status bar sits seamlessly above it whatever
+  // theme is active. A static manifest theme_color can't track plugin
+  // themes — and for already-installed PWAs only this dynamic meta tag
+  // is honored at runtime (the manifest value is baked in at install).
+  function syncMetaThemeColor() {
+    try {
+      let m = document.querySelector('meta[name="theme-color"]');
+      if (!m) {
+        m = document.createElement('meta');
+        m.setAttribute('name', 'theme-color');
+        document.head.appendChild(m);
+      }
+      const bg = getComputedStyle(document.documentElement)
+        .getPropertyValue('--ttv-bg-elev').trim();
+      if (bg) m.setAttribute('content', bg);
+    } catch (e) { /* non-fatal: cosmetic only */ }
+  }
+  syncMetaThemeColor();
 
   function emit(event, data) {
     const set = eventListeners.get(event);
