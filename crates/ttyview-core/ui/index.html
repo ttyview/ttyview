@@ -419,17 +419,44 @@
   #input-row {
     flex: none;
     display: flex;
+    /* Bottom-align: when the textarea grows, the flanking buttons and
+       Send hug the bottom edge instead of stretching with it. */
+    align-items: flex-end;
     gap: 6px;
     padding: 6px 8px;
     background: var(--ttv-bg-elev);
     border-top: 1px solid #333;
   }
+  #input-wrap {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    display: flex;
+  }
+  #input-clear {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 50%;
+    color: var(--ttv-muted);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  #input-clear:active { color: var(--ttv-fg); background: var(--ttv-bg-elev2); }
   #input-row textarea {
     flex: 1;
+    min-width: 0;
     resize: none;
     min-height: 36px;
     max-height: 120px;
     padding: 6px 10px;
+    padding-right: 32px;
     background: #252526;
     color: var(--ttv-fg);
     border: 1px solid #444;
@@ -443,6 +470,7 @@
   #input-row textarea::placeholder { color: #666; }
   #send-btn {
     flex: none;
+    min-height: 36px;
     padding: 0 14px;
     background: #4ec9b0;
     color: var(--ttv-bg-elev);
@@ -465,6 +493,9 @@
   [data-slot="input-left"] button,
   [data-slot="input-right"] button {
     flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-width: 40px;
     min-height: 36px;
     background: var(--ttv-bg-elev2);
@@ -643,7 +674,10 @@
   <!-- In-row slots flanking the textarea — for compact always-visible
        widgets (image attach, mic). Hidden until a plugin mounts. -->
   <span id="input-left" data-slot="input-left" hidden></span>
-  <textarea id="input-text" placeholder="Message" rows="1"></textarea>
+  <div id="input-wrap">
+    <textarea id="input-text" placeholder="Message" rows="1"></textarea>
+    <button id="input-clear" type="button" aria-label="Clear message" hidden>×</button>
+  </div>
   <span id="input-right" data-slot="input-right" hidden></span>
   <button id="send-btn" type="button">Send</button>
 </div>
@@ -3167,7 +3201,19 @@ function flashSendBtnError() {
 function autoResizeInput() {
   $input.style.height = 'auto';
   $input.style.height = Math.min($input.scrollHeight, 120) + 'px';
+  // Single sync point for the clear-× visibility — autoResizeInput runs
+  // on every path that changes the value (typing, plugins dispatching
+  // 'input', post-send clear).
+  if ($inputClear) $inputClear.hidden = !$input.value;
 }
+
+const $inputClear = document.getElementById('input-clear');
+$inputClear.addEventListener('mousedown', function(e) { e.preventDefault(); });
+$inputClear.addEventListener('click', function() {
+  $input.value = '';
+  autoResizeInput();
+  $input.focus();
+});
 
 $sendBtn.addEventListener('click', submitInput);
 $input.addEventListener('keydown', function(e) {
