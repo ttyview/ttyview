@@ -1,13 +1,25 @@
-// ttyview-tabs — pinned-pane tab row above the grid.
+// ttyview-tabs — session tab area (pinned tabs / all sessions).
 //
-// Tap a tab to switch panes (uses ttyview.selectPane). '+' pins the
-// active pane. Long-press a tab to unpin. State persists via the
-// per-plugin storage namespace, keyed by SESSION NAME (with pane id
-// kept as a fast-path resolver) — so the tabs survive a tmux server
-// restart that mints new pane ids, falling back to session-name match.
+// Two view modes, switched by the leading 📌/▦ toggle button and
+// persisted in settings:
+//   - pinned: the curated pin list. Tap to switch panes, '+' pins the
+//     active pane, long-press a tab then tap × to unpin.
+//   - all: every tmux session, alphabetical. Tap to switch; long-press
+//     toggles that session's pin (pinned sessions show a 📌 mark).
+// Pin state persists via the per-plugin storage namespace, keyed by
+// SESSION NAME (with pane id kept as a fast-path resolver) — so the
+// tabs survive a tmux server restart that mints new pane ids, falling
+// back to session-name match.
+//
+// The `rows` setting is both the reserved minimum height AND the
+// visible cap: when tabs need more rows, the area stays `rows` tall
+// and scrolls vertically.
+//
+// Default slot is above-input (bottom of the screen, by the thumb —
+// the tmux-web arrangement); movable via Settings → Layout.
 //
 // Two contributions sharing state via this IIFE's closure:
-//   - tabBar       — renders the tab buttons in #tab-bar
+//   - tabBar       — renders the tab buttons
 //   - settingsTab  — Settings → Pinned Tabs: pin-all-sessions action,
 //                    rows count, max tabs per row
 (function() {
@@ -17,7 +29,7 @@
   const STORAGE_KEY = 'pins';
   const SETTINGS_KEY = 'settings';
   const LONG_PRESS_MS = 500;
-  const DEFAULTS = { rows: 1, maxPerRow: 0 };  // 0 = unlimited per row
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned' };  // maxPerRow 0 = unlimited per row
 
   const storage = tv.storage('ttyview-tabs');
 
@@ -109,6 +121,11 @@
         border: 1px dashed var(--ttv-border);
         color: var(--ttv-muted);
       }
+      .ttvtab .ttvtab-pinmark {
+        font-size: 9px; line-height: 1;
+        opacity: 0.8;
+        flex: none;
+      }
       .ttvtab-add:active { color: var(--ttv-accent); border-color: var(--ttv-accent); }
       /* Multi-row container — one .ttvtab-row per row, each with its
          own horizontal scroll so a row exceeding maxPerRow can still
@@ -117,6 +134,10 @@
         display: flex; gap: 4px; flex-wrap: nowrap;
         overflow-x: auto;
         scrollbar-width: none;
+        /* Keep natural height inside the capped column-flex slot —
+           without this, a maxHeight on the slot squishes every row
+           (flex-shrink) instead of triggering vertical scroll. */
+        flex: none;
       }
       .ttvtab-row::-webkit-scrollbar { display: none; }
       /* When the tabs plugin claims its parent slot for its own
@@ -152,16 +173,32 @@
   }
 
   // ---- core render of the tab area ----
+  let renderGen = 0;  // invalidates stale rAF callbacks across re-renders
   function render() {
     if (!mountedSlot) return;
+    const gen = ++renderGen;
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
     const active = tv.getActivePane();
+    const mode = settings.mode === 'all' ? 'all' : 'pinned';
 
-    // Build the items list (pins + optional pin-current button).
-    const items = pins.slice().map(pin => ({ kind: 'pin', pin }));
-    if (active && !pins.find(p => p.session === active.session)) {
-      items.push({ kind: 'add', active });
+    // Build the items list. The mode toggle leads in both modes.
+    const items = [{ kind: 'toggle', mode }];
+    if (mode === 'pinned') {
+      // Pins + optional pin-current button.
+      for (const pin of pins) items.push({ kind: 'pin', pin });
+      if (active && !pins.find(p => p.session === active.session)) {
+        items.push({ kind: 'add', active });
+      }
+    } else {
+      // Every session, one tab each, alphabetical.
+      const seen = new Set();
+      const sessions = [];
+      for (const p of panes) {
+        if (!seen.has(p.session)) { seen.add(p.session); sessions.push(p); }
+      }
+      sessions.sort((a, b) => String(a.session).localeCompare(String(b.session)));
+      for (const p of sessions) items.push({ kind: 'sess', pane: p });
     }
 
     // Distribute into rows. In fit mode (max > 0) we chunk strictly
@@ -225,22 +262,41 @@
       if (rowEl !== mountedSlot) mountedSlot.appendChild(rowEl);
       if (fitMode) rowEl.style.setProperty('--ttv-max-per-row', String(max));
       for (const item of group) {
+        let made = null;
         if (item.kind === 'pin') {
           const resolved = resolvePin(item.pin, panes);
-          const made = makeTabButton(item.pin, resolved, active, fitMode);
-          rowEl.appendChild(made.el);
-          if (fitMode) placedTabs.push(made);
+          made = makeTabButton(item.pin, resolved, active, fitMode);
         } else if (item.kind === 'add') {
-          const made = makeAddButton(item.active, fitMode);
-          rowEl.appendChild(made.el);
-          if (fitMode) placedTabs.push(made);
+          made = makeAddButton(item.active, fitMode);
+        } else if (item.kind === 'toggle') {
+          made = makeToggleButton(item.mode, fitMode);
+        } else if (item.kind === 'sess') {
+          made = makeSessionButton(item.pane, active, fitMode);
         }
+        if (!made) continue;
+        rowEl.appendChild(made.el);
+        if (fitMode) placedTabs.push(made);
       }
+    }
+
+    // Visible-height cap: keep the area `rows` rows tall and scroll
+    // vertically past that. Measured (not hardcoded) row height so
+    // font-size / padding changes don't desync the cap.
+    if (needsOwnRow && groups.length > rows) {
+      requestAnimationFrame(function() {
+        if (gen !== renderGen || !mountedSlot) return;
+        const first = mountedSlot.firstElementChild;
+        if (!first || !first.offsetHeight) return;
+        mountedSlot.style.maxHeight =
+          (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
+        mountedSlot.style.overflowY = 'auto';
+      });
     }
 
     if (fitMode && placedTabs.length) {
       // Run after layout settles so each label sees its real width.
       requestAnimationFrame(function() {
+        if (gen !== renderGen) return;
         for (const t of placedTabs) middleEllipsisFit(t.label, t.fullText);
       });
     }
@@ -312,6 +368,86 @@
     return { el: add, label, fullText };
   }
 
+  // Leading mode toggle — shows the CURRENT mode, tap to switch.
+  function makeToggleButton(mode, fitMode) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttvtab ttvtab-add';
+    if (fitMode) btn.classList.add('fit');
+    const label = document.createElement('span');
+    label.className = 'ttvtab-label';
+    const fullText = mode === 'pinned' ? '📌' : '▦ all';
+    label.textContent = fullText;
+    btn.appendChild(label);
+    btn.title = mode === 'pinned'
+      ? 'Showing pinned tabs — tap to show all sessions'
+      : 'Showing all sessions — tap to show pinned tabs';
+    btn.setAttribute('aria-label', btn.title);
+    btn.tabIndex = -1;
+    btn.addEventListener('pointerup', function(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      settings.mode = mode === 'pinned' ? 'all' : 'pinned';
+      saveSettings();
+      render();
+    });
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    return { el: btn, label, fullText };
+  }
+
+  // All-sessions mode tab. Tap switches; long-press toggles the pin.
+  function makeSessionButton(pane, active, fitMode) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttvtab';
+    if (fitMode) btn.classList.add('fit');
+    if (active && active.session === pane.session) btn.classList.add('active');
+    const label = document.createElement('span');
+    label.className = 'ttvtab-label';
+    const fullText = pane.session || pane.id || '?';
+    label.textContent = fullText;
+    btn.appendChild(label);
+    const isPinned = !!pins.find(p => p.session === pane.session);
+    if (isPinned) {
+      const mark = document.createElement('span');
+      mark.className = 'ttvtab-pinmark';
+      mark.textContent = '📌';
+      btn.appendChild(mark);
+    }
+    btn.title = fullText + (isPinned ? ' (pinned — long-press to unpin)' : ' (long-press to pin)');
+    btn.tabIndex = -1;
+
+    let pressTimer = null;
+    let longPressed = false;
+    function clearTimer() {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    }
+    btn.addEventListener('pointerdown', function() {
+      longPressed = false;
+      clearTimer();
+      pressTimer = setTimeout(function() {
+        longPressed = true;
+        if (isPinned) {
+          pins = pins.filter(p => p.session !== pane.session);
+        } else {
+          pins.push({ id: pane.id, session: pane.session });
+        }
+        savePins();
+        render();
+      }, LONG_PRESS_MS);
+    });
+    btn.addEventListener('pointerup', function(e) {
+      clearTimer();
+      if (longPressed) { longPressed = false; return; }
+      if (e.button !== undefined && e.button !== 0) return;
+      // Keep the user's actual pane when it's already in this session.
+      tv.selectPane(active && active.session === pane.session ? active.id : pane.id);
+    });
+    btn.addEventListener('pointerleave',  function() { clearTimer(); longPressed = false; });
+    btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    return { el: btn, label, fullText };
+  }
+
   function attachTapHandlers(btn, pin, resolved) {
     let pressTimer = null;
     let longPressed = false;
@@ -359,6 +495,9 @@
   tv.contributes.tabBar({
     id: 'ttyview-tabs',
     name: 'Pinned Tabs',
+    // Bottom of the screen by the thumb (the tmux-web arrangement);
+    // the user can move it via Settings → Layout.
+    preferredSlot: 'above-input',
     render: function(slot) {
       ensureStyles();
       mountedSlot = slot;
@@ -459,7 +598,7 @@
       container.appendChild(r1);
 
       // Rows
-      const r2 = makeRow('Number of rows', 'Minimum number of rows to reserve. With Max tabs per row > 0, rows auto-grow to fit every pin; this setting is the floor.');
+      const r2 = makeRow('Number of rows', 'Visible height of the tab area, in rows (needs Max tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
       const rowsInp = document.createElement('input');
       rowsInp.type = 'number'; rowsInp.min = '1'; rowsInp.max = '5';
       rowsInp.value = String(settings.rows);
