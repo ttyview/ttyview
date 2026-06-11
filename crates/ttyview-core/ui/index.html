@@ -453,6 +453,31 @@
   }
   #send-btn:hover { background: #5fdac1; }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* In-row slots: no chrome of their own (the row provides it);
+     buttons sized to match the textarea's 36px min-height. */
+  [data-slot="input-left"],
+  [data-slot="input-right"] {
+    flex: none;
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+  [data-slot="input-left"] button,
+  [data-slot="input-right"] button {
+    flex: none;
+    min-width: 40px;
+    min-height: 36px;
+    background: var(--ttv-bg-elev2);
+    color: var(--ttv-fg);
+    border: 1px solid var(--ttv-border);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 16px;
+    padding: 0 10px;
+    cursor: pointer;
+  }
+  [data-slot="input-left"] button:active,
+  [data-slot="input-right"] button:active { background: var(--ttv-border); }
   .ttv-row {
     display: block;
     white-space: pre;
@@ -615,7 +640,11 @@
 <div id="input-accessory" data-slot="above-input" hidden></div>
 
 <div id="input-row">
+  <!-- In-row slots flanking the textarea — for compact always-visible
+       widgets (image attach, mic). Hidden until a plugin mounts. -->
+  <span id="input-left" data-slot="input-left" hidden></span>
   <textarea id="input-text" placeholder="Message" rows="1"></textarea>
+  <span id="input-right" data-slot="input-right" hidden></span>
   <button id="send-btn" type="button">Send</button>
 </div>
 
@@ -1079,6 +1108,8 @@ window.ttyview = (function() {
     { id: 'above-grid',   name: 'Above grid' },
     { id: 'below-grid',   name: 'Below grid' },
     { id: 'above-input',  name: 'Above input' },
+    { id: 'input-left',   name: 'Input row (left)' },
+    { id: 'input-right',  name: 'Input row (right)' },
   ];
   const KIND_DEFAULT_SLOT = {
     headerWidget:   'header-right',
@@ -1092,6 +1123,8 @@ window.ttyview = (function() {
     'above-grid':   'tb-slot',
     'below-grid':   'tb-slot',
     'above-input':  'ia-slot',
+    'input-left':   'ia-slot',
+    'input-right':  'ia-slot',
   };
 
   // ---- layout map (per-plugin slot override) ----
