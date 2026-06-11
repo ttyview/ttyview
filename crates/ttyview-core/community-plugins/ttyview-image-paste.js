@@ -395,7 +395,10 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.tabIndex = -1;                  // don't blur the textarea
-      btn.textContent = '🖼';
+      // tmux-web's image icon (outline landscape-in-rect). stroke uses
+      // currentColor so the accent follows the active theme.
+      btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>';
+      btn.style.color = 'var(--ttv-accent)';
       btn.title = 'Attach image (paste or drop also work)';
       btn.addEventListener('pointerup', function(e) {
         if (e.button !== undefined && e.button !== 0) return;

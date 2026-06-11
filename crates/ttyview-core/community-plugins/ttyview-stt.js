@@ -30,17 +30,24 @@
     st.id = 'ttyview-stt-style';
     st.textContent = `
       .ttv-stt-live {
-        border-color: #ff5f56 !important;
-        color: #ff5f56 !important;
-        animation: ttv-stt-pulse 1s infinite alternate;
+        border-color: #ff4444 !important;
+        color: #ff4444 !important;
+      }
+      .ttv-stt-live svg {
+        animation: ttv-stt-pulse 1s ease-in-out infinite;
       }
       @keyframes ttv-stt-pulse {
-        from { background: var(--ttv-bg-elev2); }
-        to   { background: rgba(255, 95, 86, 0.18); }
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.35; }
       }
     `;
     document.head.appendChild(st);
   }
+
+  // tmux-web's mic icon (outline). stroke uses currentColor so the
+  // accent follows the active theme and the recording state can turn
+  // it red by recoloring the button.
+  const MIC_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="17" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>';
 
   tv.contributes.inputAccessory({
     id: 'ttyview-stt',
@@ -51,7 +58,8 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.tabIndex = -1;                  // don't blur the textarea
-      btn.textContent = '🎤';
+      btn.innerHTML = MIC_SVG;
+      btn.style.color = 'var(--ttv-accent)';
       btn.title = 'Dictate (tap to start/stop)';
 
       let rec = null;       // active SpeechRecognition, null when idle
