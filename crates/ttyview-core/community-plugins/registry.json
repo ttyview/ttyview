@@ -153,6 +153,15 @@
       "author": "ttyview",
       "kind": "headerWidget",
       "source": "ttyview-reload.js"
+    },
+    {
+      "id": "ttyview-logs",
+      "name": "Client Logs",
+      "description": "On-device client log viewer (Settings tab): captures ttvDiag events, console errors/warnings, and uncaught errors into a ring buffer — phones have no devtools.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "settingsTab",
+      "source": "ttyview-logs.js"
     }
   ]
 }
