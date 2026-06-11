@@ -177,6 +177,9 @@
   function render() {
     if (!mountedSlot) return;
     const gen = ++renderGen;
+    // Re-renders happen mid-interaction (pin/unpin, panes-updated) —
+    // keep the user's scroll position instead of jumping to the top.
+    const prevScroll = mountedSlot.scrollTop;
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
     const active = tv.getActivePane();
@@ -290,6 +293,9 @@
         mountedSlot.style.maxHeight =
           (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
         mountedSlot.style.overflowY = 'auto';
+        // Restore scroll only after the cap re-creates the overflow —
+        // setting scrollTop on an uncapped element clamps it to 0.
+        if (prevScroll) mountedSlot.scrollTop = prevScroll;
       });
     }
 
