@@ -144,6 +144,15 @@
       "author": "ttyview",
       "kind": "inputAccessory",
       "source": "ttyview-stt.js"
+    },
+    {
+      "id": "ttyview-reload",
+      "name": "Reload App",
+      "description": "One-tap full app reload from a header button or the command palette. Handy inside installed PWAs (no URL bar) and while iterating on plugins.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "headerWidget",
+      "source": "ttyview-reload.js"
     }
   ]
 }
