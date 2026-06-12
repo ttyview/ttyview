@@ -49,6 +49,21 @@
   function savePins()      { storage.set(STORAGE_KEY,    pins);     }
   function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
 
+  // External writers (ttyview-live-sync applying an agent's /api/state
+  // change, or another browser's edit) update our storage behind the
+  // closure's back — `pins`/`settings` are read once at load. Re-read
+  // and re-render when they tell us. Module-scope subscription: tab
+  // state must converge even while the tabBar is unmounted.
+  tv.on('storage-changed', function (e) {
+    if (!e || e.pluginId !== 'ttyview-tabs') return;
+    if (e.key === STORAGE_KEY) {
+      pins = Array.isArray(e.value) ? e.value : [];
+    } else if (e.key === SETTINGS_KEY) {
+      settings = Object.assign({}, DEFAULTS, e.value || {});
+    } else return;
+    render();
+  });
+
   // Geometry diagnostics for the "section moves on toggle" report —
   // lands in the daemon's diag.jsonl and the Client Logs tab. One
   // record per render settle + a per-frame burst around toggles.

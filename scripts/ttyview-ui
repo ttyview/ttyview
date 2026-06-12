@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# ttyview-ui — drive a ttyview/mobile-cc UI from the host.
+#
+# Thin curl wrapper over the daemon's /api/state. The browser side is
+# the ttyview-live-sync plugin: it polls /api/state every ~1.5 s and
+# applies whatever this script writes — so changes land on the phone
+# without a reload.
+#
+#   ttyview-ui theme nord                  switch theme (or: none)
+#   ttyview-ui view cell-grid              switch terminal view
+#   ttyview-ui toast "build done"          transient toast (~4 s)
+#   ttyview-ui toast "need input" --sticky persistent until tapped
+#   ttyview-ui tabs                        list pinned tabs
+#   ttyview-ui pin %5 [--session S] [--row N]   pin a pane (session
+#                                          auto-resolved via tmux)
+#   ttyview-ui unpin <pane-id|session>     remove a pin
+#   ttyview-ui state                       dump full /api/state
+#   ttyview-ui set <key> <json>            raw key write
+#   ttyview-ui del <key>                   raw key delete
+#
+# Target daemon: --url URL flag, else $TTYVIEW_UI_URL, else
+# http://127.0.0.1:7800 (mobile-cc). ttyview default port is :7785.
+set -euo pipefail
+
+URL="${TTYVIEW_UI_URL:-http://127.0.0.1:7800}"
+QUEUE_KEY="ttv-agent-cmd-queue"
+QUEUE_MAX=20   # CLI trims on every append — nothing else ever prunes
+
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+need_jq() { command -v jq >/dev/null || { echo "ttyview-ui: jq is required" >&2; exit 1; }; }
+
+api_get_state() { curl -fsS "$URL/api/state"; }
+api_put() { # $1=key  $2=json-body
+  curl -fsS -X PUT -H 'content-type: application/json' \
+    --data-raw "$2" "$URL/api/state/$1" >/dev/null
+}
+api_del() { curl -fsS -X DELETE "$URL/api/state/$1" >/dev/null; }
+
+# ---- arg parse (pull --url out from anywhere) -------------------------
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --url) URL="$2"; shift 2 ;;
+    --url=*) URL="${1#--url=}"; shift ;;
+    -h|--help) usage 0 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+[ $# -ge 1 ] || usage 1
+CMD="$1"; shift
+
+case "$CMD" in
+  state)
+    need_jq
+    api_get_state | jq .
+    ;;
+
+  theme)
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui theme <id|none>" >&2; exit 1; }
+    if [ "$1" = "none" ]; then api_del ttv-active-theme
+    else api_put ttv-active-theme "\"$1\""; fi
+    echo "theme → $1"
+    ;;
+
+  view)
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui view <id>" >&2; exit 1; }
+    api_put ttv-active-view "\"$1\""
+    echo "view → $1"
+    ;;
+
+  toast)
+    need_jq
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui toast <message> [--sticky]" >&2; exit 1; }
+    MSG="$1"; shift
+    STICKY=false
+    [ "${1:-}" = "--sticky" ] && STICKY=true
+    NOW_MS=$(date +%s%3N)
+    # Read-modify-write: next seq = max(seq)+1; trim to the newest
+    # QUEUE_MAX entries so the queue can't grow without bound.
+    api_get_state \
+      | jq --arg msg "$MSG" --argjson sticky "$STICKY" --argjson ts "$NOW_MS" --argjson max "$QUEUE_MAX" '
+          (.keys["'"$QUEUE_KEY"'"] // []) as $q
+          | ((($q | map(.seq) | max) // 0) + 1) as $seq
+          | ($q + [{seq:$seq, ts:$ts, action:"toast", message:$msg, sticky:$sticky}])
+          | sort_by(.seq) | .[-$max:]' \
+      | curl -fsS -X PUT -H 'content-type: application/json' \
+          --data-binary @- "$URL/api/state/$QUEUE_KEY" >/dev/null
+    echo "toast queued${STICKY:+}$([ "$STICKY" = true ] && echo ' (sticky)')"
+    ;;
+
+  tabs)
+    need_jq
+    api_get_state | jq -r '
+      (.keys["ttv-plugin:ttyview-tabs:pins"] // [])
+      | if length == 0 then "no pins"
+        else .[] | "\(.session)\t\(.id)\trow \(.row // 1)" end'
+    ;;
+
+  pin)
+    need_jq
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui pin <pane-id> [--session S] [--row N]" >&2; exit 1; }
+    PANE="$1"; shift
+    SESSION=""; ROW=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --session) SESSION="$2"; shift 2 ;;
+        --row) ROW="$2"; shift 2 ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+      esac
+    done
+    if [ -z "$SESSION" ]; then
+      SESSION=$(tmux display-message -p -t "$PANE" '#S' 2>/dev/null) \
+        || { echo "ttyview-ui: can't resolve session for $PANE — pass --session" >&2; exit 1; }
+    fi
+    # Pins are keyed by session (pane id is a fast-path resolver):
+    # re-pinning a session replaces its entry.
+    api_get_state \
+      | jq --arg id "$PANE" --arg session "$SESSION" --arg row "$ROW" '
+          (.keys["ttv-plugin:ttyview-tabs:pins"] // [])
+          | map(select(.session != $session))
+          + [({id:$id, session:$session}
+              + (if $row != "" then {row:($row|tonumber)} else {} end))]' \
+      | curl -fsS -X PUT -H 'content-type: application/json' \
+          --data-binary @- "$URL/api/state/ttv-plugin:ttyview-tabs:pins" >/dev/null
+    echo "pinned $SESSION ($PANE)${ROW:+ row $ROW}"
+    ;;
+
+  unpin)
+    need_jq
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui unpin <pane-id|session>" >&2; exit 1; }
+    TARGET="$1"
+    api_get_state \
+      | jq --arg t "$TARGET" '
+          (.keys["ttv-plugin:ttyview-tabs:pins"] // [])
+          | map(select(.id != $t and .session != $t))' \
+      | curl -fsS -X PUT -H 'content-type: application/json' \
+          --data-binary @- "$URL/api/state/ttv-plugin:ttyview-tabs:pins" >/dev/null
+    echo "unpinned $TARGET"
+    ;;
+
+  set)
+    [ $# -ge 2 ] || { echo "usage: ttyview-ui set <key> <json>" >&2; exit 1; }
+    api_put "$1" "$2"
+    echo "set $1"
+    ;;
+
+  del)
+    [ $# -ge 1 ] || { echo "usage: ttyview-ui del <key>" >&2; exit 1; }
+    api_del "$1"
+    echo "deleted $1"
+    ;;
+
+  *)
+    echo "ttyview-ui: unknown command '$CMD'" >&2
+    usage 1
+    ;;
+esac

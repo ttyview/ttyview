@@ -162,6 +162,15 @@
       "author": "ttyview",
       "kind": "settingsTab",
       "source": "ttyview-logs.js"
+    },
+    {
+      "id": "ttyview-live-sync",
+      "name": "Live Sync",
+      "description": "Applies server-side /api/state changes live (no reload): theme/view switches, pinned-tab edits, and agent-pushed toasts via the ttyview-ui CLI. Also makes multiple browsers on the same daemon converge.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "command",
+      "source": "ttyview-live-sync.js"
     }
   ]
 }
