@@ -9,7 +9,9 @@
 // Pin state persists via the per-plugin storage namespace, keyed by
 // SESSION NAME (with pane id kept as a fast-path resolver) — so the
 // tabs survive a tmux server restart that mints new pane ids, falling
-// back to session-name match.
+// back to session-name match. A pin may carry an optional 1-based
+// `row` to place it on a specific row of the grid (organize pins
+// into groups); unassigned pins flow into row 1.
 //
 // The `rows` setting is both the reserved minimum height AND the
 // visible cap: when tabs need more rows, the area stays `rows` tall
@@ -222,13 +224,19 @@
     const active = tv.getActivePane();
     const mode = settings.mode === 'all' ? 'all' : 'pinned';
 
-    // Build the items list. The mode toggle leads in both modes.
-    const items = [{ kind: 'toggle', mode }];
+    // Build row buckets. The mode toggle leads row 1 in both modes.
+    // Pins may carry an optional 1-based `row` to be placed on a
+    // specific row (organize pins into groups); unassigned pins flow
+    // into row 1. In all mode everything flows from row 1.
+    const buckets = [[{ kind: 'toggle', mode }]];
     if (mode === 'pinned') {
-      // Pins + optional pin-current button.
-      for (const pin of pins) items.push({ kind: 'pin', pin });
+      for (const pin of pins) {
+        const r = Math.max(1, Math.min(9, (pin.row | 0) || 1));
+        while (buckets.length < r) buckets.push([]);
+        buckets[r - 1].push({ kind: 'pin', pin });
+      }
       if (active && !pins.find(p => p.session === active.session)) {
-        items.push({ kind: 'add', active });
+        buckets[0].push({ kind: 'add', active });
       }
     } else {
       // Every session, one tab each, alphabetical.
@@ -238,26 +246,28 @@
         if (!seen.has(p.session)) { seen.add(p.session); sessions.push(p); }
       }
       sessions.sort((a, b) => String(a.session).localeCompare(String(b.session)));
-      for (const p of sessions) items.push({ kind: 'sess', pane: p });
+      for (const p of sessions) buckets[0].push({ kind: 'sess', pane: p });
     }
 
-    // Distribute into rows. In fit mode (max > 0) we chunk strictly
-    // by maxPerRow and let rows auto-grow to hold every item; the
-    // `rows` setting becomes a minimum (handy for reserving vertical
-    // space when there are few pins). Without max, the `rows`
-    // setting is irrelevant — a single horizontally-scrolling row.
+    // Distribute into rows. In fit mode (max > 0) each bucket chunks
+    // strictly by maxPerRow (an overfull bucket spills into extra
+    // rows); the `rows` setting is the visible height. Without max,
+    // row assignments are ignored — a single horizontally-scrolling
+    // row.
     const rows = Math.max(1, settings.rows | 0);
     const max  = Math.max(0, settings.maxPerRow | 0);
     let groups;
     if (max === 0) {
-      groups = [items];
+      groups = [buckets.flat()];
     } else {
       groups = [];
-      for (let i = 0; i < items.length; i += max) {
-        groups.push(items.slice(i, i + max));
+      for (const bucket of buckets) {
+        if (bucket.length === 0) { groups.push([]); continue; }
+        for (let i = 0; i < bucket.length; i += max) {
+          groups.push(bucket.slice(i, i + max));
+        }
       }
       while (groups.length < rows) groups.push([]);
-      if (groups.length === 0) groups = [items];
     }
 
     // Container layout. Fit mode (maxPerRow > 0) always stacks rows
