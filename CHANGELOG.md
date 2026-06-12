@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-12
+
+### Added
+
+- **`header-left` layout slot** — plugins can mount an inline widget
+  at the header's left edge (e.g. a brand glyph), instead of being
+  limited to the right-side widget area or a full top-bar row.
+- **`'semantic'` plugin event + `tv.refreshPanes()`** — plugins can
+  subscribe to semantic events (e.g. Claude Code permission prompts)
+  for *all* panes via a `kinds:['semantic']` WS subscription, and ask
+  the client to refresh its pane list. Groundwork for per-tab status
+  indicators and, later, Web Push.
+- **Tab status dots (`ttyview-tabs`)** — per-session activity dots on
+  pinned tabs: amber pulsing = permission prompt waiting (semantic
+  events), blue pulsing = recent output, orange = finished since last
+  viewed. Toggleable in the tabs settings. Plus project groups, a
+  utility rail, and group reordering in the tabs plugin.
+- **Fit-resize** — on narrow viewports the client can auto-narrow a
+  wide tmux window (via WS `{t:"resize"}`) so the grid reflows to a
+  readable font (11 px floor) instead of being squeezed or clipped.
+- **`ttyview-stt-groq` community plugin** — voice input with
+  selectable engines: built-in Web Speech (default, zero-config) or
+  Groq Whisper + LLM transcript cleanup, browser-direct with a
+  bring-your-own API key (Settings → Voice Input). Superset of
+  `ttyview-stt`; bundle one or the other, not both.
+
+### Fixed
+
+- **Read-only WS connections can no longer resize tmux windows** —
+  `{t:"resize"}` is rejected in read-only mode, matching the existing
+  input restrictions.
+
 ## [0.1.3] — 2026-06-12
 
 ### Fixed
@@ -172,6 +204,9 @@ view, Claude Code chat view, Solarized Dark / Terminal Green / Nord
 themes), sandbox broker (Tier 3 demo), Cloud Run image, GCE VM
 deploy scripts.
 
-[Unreleased]: https://github.com/ttyview/ttyview/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ttyview/ttyview/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/ttyview/ttyview/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/ttyview/ttyview/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/ttyview/ttyview/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ttyview/ttyview/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ttyview/ttyview/releases/tag/v0.1.0
