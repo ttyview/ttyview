@@ -695,6 +695,8 @@ const $status = document.getElementById('status');
 let activePaneId = null;
 let ws = null;
 let wsRetryMs = 1000;
+let wsReconnectTimer = 0;   // pending onclose-scheduled reconnect
+let lastWsMsgTs = 0;        // any inbound WS message — liveness probe reads this
 
 // =============================================================
 // Server-authoritative client state
@@ -1383,6 +1385,12 @@ setInterval(() => {
   lastStallTick = now;
   if (stall > 250) {
     ttvDiag('stall', { dur_ms: +stall.toFixed(0) });
+    // A multi-second stall while visible = we were just unfrozen
+    // (observed 2026-06-12: 24.9s wake-up stall with no visibility
+    // event in the diag log). Treat it like a resume.
+    if (stall > 5000 && document.visibilityState === 'visible') {
+      resumeResync(stall, 'stall');
+    }
   }
 }, 100);
 // Cap diff-flush size so a giant batch can't itself become a stall.
@@ -1541,6 +1549,8 @@ async function loadGrid(paneId) {
 }
 
 function connectWs() {
+  clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = 0;
   if (ws) { try { ws.close(); } catch (e) {} }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(proto + '//' + location.host + '/ws');
@@ -1561,6 +1571,7 @@ function connectWs() {
     }
   };
   ws.onmessage = function(ev) {
+    lastWsMsgTs = Date.now();
     let msg;
     try { msg = JSON.parse(ev.data); } catch (e) { return; }
     // Acks / errs don't carry a pane id; surface them BEFORE the
@@ -1626,7 +1637,7 @@ function connectWs() {
   ws.onclose = function(ev) {
     ttvDiag('ws', { ev: 'close', code: ev?.code, reason: ev?.reason || '', clean: !!ev?.wasClean, retry_ms: wsRetryMs });
     setStatus('reconnecting in ' + (wsRetryMs/1000) + 's…');
-    setTimeout(connectWs, wsRetryMs);
+    wsReconnectTimer = setTimeout(connectWs, wsRetryMs);
     wsRetryMs = Math.min(wsRetryMs * 2, 15000);
   };
   ws.onerror = function() {
@@ -1634,6 +1645,91 @@ function connectWs() {
     setStatus('ws error', 'error');
   };
 }
+
+// === Background-resume resync ===
+// Android aggressively throttles hidden pages (timers clamp to 1/s),
+// then freezes them outright: rAF stops, the cell-diff backlog queues
+// unbounded, and the WS can die without its close event surfacing
+// until long after the user returns. Net effect (diag 2026-06-12,
+// mobile-cc): come back to the app → stale frame for many seconds —
+// or forever — under a green "connected" dot. On any return to the
+// foreground after a real gap, repaint from an authoritative HTTP
+// grid fetch and verify the WS is actually alive.
+let hiddenAtTs = 0;
+let frozeAtTs = 0;
+let lastResumeResyncTs = 0;
+
+function forceWsReconnect(reason) {
+  ttvDiag('ws', { ev: 'force-reconnect', reason: reason });
+  if (ws) {
+    // Detach handlers before close(): on a dead TCP the close event
+    // can take the full closing-handshake timeout, and onclose would
+    // schedule a SECOND connect on top of the immediate one below.
+    try { ws.onclose = null; ws.onerror = null; ws.onmessage = null; ws.close(); } catch (e) {}
+    ws = null;
+  }
+  wsRetryMs = 1000;
+  connectWs();
+}
+
+function resumeResync(gapMs, src) {
+  if (!activePaneId) return;
+  if (gapMs < 2000) return;  // brief blip — the queued rAF flush covers it
+  const now = Date.now();
+  // visibilitychange, lifecycle resume, and the stall detector can all
+  // observe the same wake-up; resync once.
+  if (now - lastResumeResyncTs < 1000) return;
+  lastResumeResyncTs = now;
+  ttvDiag('resume-resync', { gap_ms: Math.round(gapMs), src: src, ws_state: ws ? ws.readyState : -1 });
+  // Authoritative repaint — works even if the WS is dead. grid-loaded
+  // also makes the terminal-view plugin drop its stale diff backlog.
+  loadGrid(activePaneId);
+  loadPanes();
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    forceWsReconnect('resume-' + src);
+    return;
+  }
+  // The socket *claims* open, but Android may have killed the TCP
+  // while we were frozen. Probe: re-sub (idempotent, server acks) and
+  // require ANY inbound message within 3s, else reconnect.
+  const probeTs = now;
+  try {
+    ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
+  } catch (e) {
+    forceWsReconnect('resume-send-failed');
+    return;
+  }
+  setTimeout(function() {
+    if (lastWsMsgTs >= probeTs) return;                   // alive
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;  // already reconnecting
+    forceWsReconnect('resume-probe-timeout');
+  }, 3000);
+}
+
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'hidden') {
+    hiddenAtTs = Date.now();
+    ttvDiag('visibility', { state: 'hidden' });
+    ttvDiagFlush();  // the page may freeze before the 1s flush timer fires
+  } else {
+    const gap = hiddenAtTs ? Date.now() - hiddenAtTs : 0;
+    ttvDiag('visibility', { state: 'visible', hidden_ms: Math.round(gap) });
+    resumeResync(gap, 'visible');
+  }
+});
+
+// Page Lifecycle API (Chrome): explicit freeze/resume, which can fire
+// without a visibilitychange we get to observe.
+document.addEventListener('freeze', function() {
+  frozeAtTs = Date.now();
+  ttvDiag('lifecycle', { ev: 'freeze' });
+  ttvDiagFlush();
+});
+document.addEventListener('resume', function() {
+  const gap = frozeAtTs ? Date.now() - frozeAtTs : 0;
+  ttvDiag('lifecycle', { ev: 'resume', frozen_ms: Math.round(gap) });
+  if (document.visibilityState === 'visible') resumeResync(gap, 'resume');
+});
 
 async function selectPane(paneId) {
   if (paneId === activePaneId) return;
@@ -2783,6 +2879,13 @@ window.ttyview.contributes.terminalView({
 
     // === Render handlers ===
     function buildGrid(screen) {
+      // A full snapshot supersedes everything in the diff queue —
+      // queued diffs predate it. Replaying them (a multi-minute
+      // background backlog hit 73k cells in the 2026-06-12 diag)
+      // would paint stale cells over fresh state and itself stall
+      // the main thread.
+      pendingDiffs = [];
+      if (diffRafId) { cancelAnimationFrame(diffRafId); diffRafId = 0; }
       $empty.style.display = 'none';
       $sbHost.innerHTML = '';
       $primaryHost.innerHTML = '';
