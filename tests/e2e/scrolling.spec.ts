@@ -19,7 +19,7 @@ test('scrollback rows render in #sb-host', async ({ page }) => {
   await new Promise(r => setTimeout(r, 1500));
 
   await page.goto('/');
-  await expect(page.locator('#status')).toContainText('connected', { timeout: 5000 });
+  await expect(page.locator('#status')).toHaveClass(/\bconnected\b/, { timeout: 5000 });
 
   // The first batch of fetched scrollback should populate #sb-host
   const sbCount = await page.locator('#sb-host .ttv-row').count();
@@ -32,7 +32,7 @@ test('scrollback rows render in #sb-host', async ({ page }) => {
 
 test('grid host is scrollable when content exceeds viewport', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#status')).toContainText('connected', { timeout: 5000 });
+  await expect(page.locator('#status')).toHaveClass(/\bconnected\b/, { timeout: 5000 });
 
   const dims = await page.locator('#grid-host').evaluate((el) => ({
     clientHeight: el.clientHeight,

@@ -28,7 +28,7 @@ test('typing in the input box → keys arrive in the tmux pane', async ({ page }
   expect(selValue).toBe(env.paneId);
 
   // Wait for grid to load
-  await expect(page.locator('#status')).toContainText('connected', { timeout: 5000 });
+  await expect(page.locator('#status')).toHaveClass(/\bconnected\b/, { timeout: 5000 });
 
   // Type into the input + click Send
   const marker = 'TTV_E2E_' + Date.now();
@@ -51,7 +51,7 @@ test('typing in the input box → keys arrive in the tmux pane', async ({ page }
 
 test('Enter in the textarea also submits', async ({ page }) => {
   await page.goto('/');
-  await expect(page.locator('#status')).toContainText('connected', { timeout: 5000 });
+  await expect(page.locator('#status')).toHaveClass(/\bconnected\b/, { timeout: 5000 });
 
   const marker = 'TTV_ENTER_' + Date.now();
   await page.locator('#input-text').fill(marker);
@@ -75,7 +75,7 @@ test('client sends WS frames with t:"input" (not kind:"input")', async ({ page }
   });
 
   await page.goto('/');
-  await expect(page.locator('#status')).toContainText('connected', { timeout: 5000 });
+  await expect(page.locator('#status')).toHaveClass(/\bconnected\b/, { timeout: 5000 });
 
   await page.locator('#input-text').fill('hi');
   await page.locator('#send-btn').click();
