@@ -449,7 +449,7 @@ async fn handle_client_msg(
             // AppState.resized_windows) so it gets restored to `latest` on
             // the last interested disconnect / explicit `restore-size`.
             let socket = app.tmux_socket.clone();
-            let pane_arg = pane.clone();
+            let pane_arg = crate::tmux_pane_target(&pane).to_string();
             let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                 let run = |args: &[&str]| -> anyhow::Result<std::process::Output> {
                     let mut cmd = std::process::Command::new("tmux");
@@ -522,7 +522,7 @@ async fn handle_client_msg(
             // release it. No-op if we don't (e.g. a client sending
             // restore-size without a prior resize).
             let socket = app.tmux_socket.clone();
-            let pane_arg = pane.clone();
+            let pane_arg = crate::tmux_pane_target(&pane).to_string();
             let win_result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
                 let mut cmd = std::process::Command::new("tmux");
                 if let Some(s) = &socket {
@@ -744,6 +744,10 @@ fn preview_keys(keys: &str, max: usize) -> String {
 }
 
 fn send_keys_chunked(socket: Option<&str>, pane: &str, keys: &str) -> anyhow::Result<()> {
+    // Old clients (and pins persisted from a daemon hit by the tmux <= 3.3
+    // tab-mangling bug — released mobile-cc v0.1.x/v0.2.0) may hand us
+    // composite ids like "%0_work_0"; reduce to the raw "%0" tmux knows.
+    let pane = crate::tmux_pane_target(pane);
     // Strategy: split off the trailing CR (if any) and send it as a
     // separate `tmux send-keys Enter` call AFTER a short delay. This is
     // the "paste-then-delayed-Enter" pattern that Claude Code's TUI

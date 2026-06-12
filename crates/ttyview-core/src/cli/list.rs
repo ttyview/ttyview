@@ -6,11 +6,14 @@ pub async fn run(socket: Option<&str>) -> Result<()> {
     if let Some(s) = socket {
         cmd.arg("-L").arg(s);
     }
+    // '|'-separated, free-text fields last: tmux <= 3.3 replaces tabs in
+    // -F output with '_'. pane_current_command and session_name may contain
+    // spaces, so constrained fields lead and splitn keeps the remainder.
     let out = cmd
         .args([
             "list-panes",
             "-aF",
-            "#{session_name}\t#{window_index}\t#{pane_id}\t#{pane_current_command}\t#{pane_width}x#{pane_height}",
+            "#{window_index}|#{pane_id}|#{pane_width}x#{pane_height}|#{pane_current_command}|#{session_name}",
         ])
         .output()
         .await
@@ -23,12 +26,12 @@ pub async fn run(socket: Option<&str>) -> Result<()> {
     }
     println!("{:<20} {:>3}  {:<6} {:<20} {}", "session", "win", "pane", "cmd", "size");
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut parts = line.splitn(5, '\t');
-        let s = parts.next().unwrap_or("");
+        let mut parts = line.splitn(5, '|');
         let w = parts.next().unwrap_or("");
         let p = parts.next().unwrap_or("");
-        let c = parts.next().unwrap_or("");
         let sz = parts.next().unwrap_or("");
+        let c = parts.next().unwrap_or("");
+        let s = parts.next().unwrap_or("");
         println!("{:<20} {:>3}  {:<6} {:<20} {}", s, w, p, c, sz);
     }
     Ok(())

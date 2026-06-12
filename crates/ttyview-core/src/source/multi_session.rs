@@ -246,6 +246,9 @@ async fn list_session_panes(
     if let Some(s) = socket {
         cmd.arg("-L").arg(s);
     }
+    // Space separator, not \t — tmux <= 3.3 replaces tabs in -F output
+    // with '_', which used to fuse pane id and window index into one
+    // bogus composite id. Both fields here are space-free.
     let out = cmd
         .args([
             "list-panes",
@@ -253,7 +256,7 @@ async fn list_session_panes(
             "-t",
             session,
             "-F",
-            "#{pane_id}\t#{window_index}",
+            "#{pane_id} #{window_index}",
         ])
         .output()
         .await?;
@@ -265,9 +268,13 @@ async fn list_session_panes(
     }
     let mut out_panes = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut parts = line.split('\t');
+        let mut parts = line.split(' ');
         let id = match parts.next() {
-            Some(s) if !s.is_empty() => s,
+            Some(s) if crate::is_raw_tmux_pane_id(s) => s,
+            Some(s) if !s.is_empty() => {
+                warn!("list-panes -s returned unparseable pane id {s:?}; skipping");
+                continue;
+            }
             _ => continue,
         };
         let window = parts.next().unwrap_or("0").to_string();

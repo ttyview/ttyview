@@ -18,6 +18,7 @@
   const tv = window.ttyview;
   if (!tv || tv.apiVersion !== 1) return;
   const POLL_MS = 2000;
+  const NOT_CC_POLL_MS = 10000; // relaxed cadence for non-CC panes
 
   tv.contributes.terminalView({
     id: 'ttyview-cc',
@@ -171,6 +172,10 @@
       let lastJsonl = '';
       let pollTimer = null;
       let stopped = false;
+      // While the pane isn't a CC pane, poll at a relaxed cadence —
+      // hammering a known-404 endpoint every 2s wastes phone battery
+      // and floods the console.
+      let notCcPane = false;
 
       async function fetchAndRender() {
         const pane = ctx.api.getActivePane();
@@ -182,6 +187,8 @@
         try {
           const r = await fetch('/panes/' + encodeURIComponent(pane.id) + '/cc-transcript?tail=300');
           if (!r.ok) {
+            if (notCcPane) return; // empty-state already rendered; stay quiet
+            notCcPane = true;
             // Not a CC pane (plain shell, vim, top, …). Offer a
             // one-tap switch to the terminal renderer instead of a
             // raw error string. The switch is apply-only
@@ -208,6 +215,7 @@
             $list.appendChild(panel);
             return;
           }
+          notCcPane = false;
           const data = await r.json();
           const wasAtBottom = (host.scrollHeight - host.scrollTop - host.clientHeight) < 30;
           // Cheap change-detection: skip rebuild if file + count match.
@@ -236,7 +244,7 @@
         pollTimer = setTimeout(async function() {
           await fetchAndRender();
           schedule();
-        }, POLL_MS);
+        }, notCcPane ? NOT_CC_POLL_MS : POLL_MS);
       }
 
       fetchAndRender().then(schedule);
@@ -244,7 +252,7 @@
       const offPane = tv.on('pane-changed', function() {
         // New pane → reset cache so the new transcript renders even if
         // counts happen to coincide.
-        lastCount = -1; lastJsonl = '';
+        lastCount = -1; lastJsonl = ''; notCcPane = false;
         fetchAndRender();
       });
 

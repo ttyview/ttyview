@@ -151,7 +151,7 @@ async fn capture_pane_cursor(pane: &str, socket: Option<&str>) -> Result<(u16, u
             "-p",
             "-t",
             pane,
-            "#{cursor_y}\t#{cursor_x}",
+            "#{cursor_y} #{cursor_x}",
         ])
         .output()
         .await
@@ -164,7 +164,7 @@ async fn capture_pane_cursor(pane: &str, socket: Option<&str>) -> Result<(u16, u
     }
     let s = String::from_utf8_lossy(&out.stdout);
     let s = s.trim();
-    let (y, x) = s.split_once('\t').context("parsing cursor")?;
+    let (y, x) = s.split_once(' ').context("parsing cursor")?;
     Ok((y.parse()?, x.parse()?))
 }
 

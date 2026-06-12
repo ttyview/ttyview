@@ -845,7 +845,8 @@ pub async fn seed_pane(
             "-p",
             "-t",
             &id.0,
-            "#{pane_height}\t#{pane_width}\t#{cursor_y}\t#{cursor_x}",
+            // Space-separated: tmux <= 3.3 turns tabs in -F output into '_'.
+            "#{pane_height} #{pane_width} #{cursor_y} #{cursor_x}",
         ])
         .output()
         .await
@@ -854,7 +855,7 @@ pub async fn seed_pane(
         return Ok(false); // pane vanished; non-fatal
     }
     let geom = String::from_utf8_lossy(&geom_out.stdout);
-    let mut g = geom.trim().split('\t');
+    let mut g = geom.split_whitespace();
     let rows: u16 = g.next().and_then(|x| x.parse().ok()).unwrap_or(24);
     let cols: u16 = g.next().and_then(|x| x.parse().ok()).unwrap_or(80);
     let cy: u16 = g.next().and_then(|x| x.parse().ok()).unwrap_or(0);

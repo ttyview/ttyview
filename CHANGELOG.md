@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-12
+
+### Fixed
+
+- **tmux ≤ 3.3 compatibility — pane ids were unusable on stock
+  Debian 12 / Ubuntu 22.04** (the bug that made released mobile-cc
+  builds dead on arrival on fresh machines). tmux ≤ 3.3 replaces tab
+  characters in `-F` format output with `_` (fixed upstream in tmux
+  3.4); every tab-delimited format string we parsed therefore
+  collapsed into a single underscore-joined field, producing composite
+  pane ids like `%0_work_0` that tmux then rejected on `send-keys`
+  ("can't find pane"). All seven `-F` call sites now use
+  version-proof separators (space / `|`, free-text fields last,
+  `splitn`), pane ids are validated against `%<digits>` at the parse
+  boundary, and client-supplied pane targets are normalized
+  (`tmux_pane_target`) before every tmux shell-out — so clients
+  holding stale composite ids from affected daemons keep working.
+- **CC chat view polls non-CC panes gently.** The "not a CC pane"
+  empty state no longer refetches every 2 s forever (now 10 s,
+  rendered once) — less battery drain and console noise on phones.
+- **Pane picker never renders a blank, nameless row** — panes without
+  a known session label fall back to their pane id.
+- **favicon 404 silenced** with an empty `data:` icon link.
+
+### Added
+
+- Post-v0.1.2 feature wave (see `git log v0.1.2..v0.1.3` for the full
+  list): `ttyview-stt` (Web Speech dictation), `ttyview-logs`
+  (on-device client log viewer + `ttyviewLog()` API),
+  `ttyview-reload`, `ttyview-live-sync` + `ttyview-ui` CLI
+  (agent-driven UI control), tabs pinned/all mode toggle + per-pin
+  row assignment, input-row slots + clear-×, image-paste data-URL
+  thumbnails, `RunOptions.extra_static` embedder-assets hook (PWA
+  enabler), multi-session keepalive probes (tmux 3.4 control-mode
+  crash mitigation), background-resume resync for mobile clients.
+
 ### Changed
 
 - **`--demo` mode polish.** Seeds 5 synthetic panes (`mobile-cc`,

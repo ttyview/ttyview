@@ -259,6 +259,8 @@ async fn get_scrollback(
     let lines = q.lines.unwrap_or(200).min(5000) as i64;
     // tmux capture-pane: -S start_line. Negative = N lines into history.
     let start = format!("-{}", lines);
+    // Tolerate composite ids from old clients (tmux <= 3.3 mangling era).
+    let id = crate::tmux_pane_target(&id).to_string();
     let mut cmd = Command::new("tmux");
     if let Some(s) = &app.tmux_socket {
         cmd.arg("-L").arg(s);
@@ -290,6 +292,7 @@ async fn get_baseline(
     State(app): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
+    let id = crate::tmux_pane_target(&id).to_string();
     let mut cmd = Command::new("tmux");
     if let Some(s) = &app.tmux_socket {
         cmd.arg("-L").arg(s);
@@ -555,6 +558,7 @@ async fn get_cc_transcript(
     // 1. Pane current path via tmux. We can't use the cached PaneStore
     //    state because it doesn't track cwd — pane_current_path is a
     //    separate tmux property maintained by tmux itself.
+    let id = crate::tmux_pane_target(&id).to_string();
     let mut cmd = Command::new("tmux");
     if let Some(s) = &app.tmux_socket {
         cmd.arg("-L").arg(s);

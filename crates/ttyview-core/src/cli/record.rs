@@ -136,7 +136,7 @@ async fn pane_cursor(pane: &str, socket: Option<&str>) -> Result<(u16, u16)> {
             "-p",
             "-t",
             pane,
-            "#{cursor_y}\t#{cursor_x}",
+            "#{cursor_y} #{cursor_x}",
         ])
         .output()
         .await
@@ -149,7 +149,7 @@ async fn pane_cursor(pane: &str, socket: Option<&str>) -> Result<(u16, u16)> {
     }
     let s = String::from_utf8_lossy(&out.stdout);
     let s = s.trim();
-    let (y, x) = s.split_once('\t').context("parsing cursor")?;
+    let (y, x) = s.split_once(' ').context("parsing cursor")?;
     Ok((y.parse()?, x.parse()?))
 }
 
@@ -159,7 +159,7 @@ async fn pane_size(pane: &str, socket: Option<&str>) -> Result<(u16, u16)> {
         cmd.arg("-L").arg(s);
     }
     let out = cmd
-        .args(["display", "-p", "-t", pane, "#{pane_height}\t#{pane_width}"])
+        .args(["display", "-p", "-t", pane, "#{pane_height} #{pane_width}"])
         .output()
         .await
         .context("tmux display")?;
@@ -171,7 +171,7 @@ async fn pane_size(pane: &str, socket: Option<&str>) -> Result<(u16, u16)> {
     }
     let s = String::from_utf8_lossy(&out.stdout);
     let s = s.trim();
-    let (h, w) = s.split_once('\t').context("parsing pane size")?;
+    let (h, w) = s.split_once(' ').context("parsing pane size")?;
     Ok((h.parse()?, w.parse()?))
 }
 

@@ -417,7 +417,8 @@
     if (active && p.id === active.id) item.classList.add('active');
     const sess = document.createElement('span');
     sess.className = 'pp-session';
-    sess.textContent = same.length > 1 ? p.session + ' (' + (idx + 1) + ')' : p.session;
+    const sessName = p.session || ('pane ' + String(p.id).replace(/^%/, 'p'));
+    sess.textContent = same.length > 1 ? sessName + ' (' + (idx + 1) + ')' : sessName;
     item.appendChild(sess);
     // Suppress the meta column when every session in the picker is a
     // single pane in w0 — the column is the same `· w0 · 60×28` on

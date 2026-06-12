@@ -380,11 +380,16 @@ async fn prepopulate_panes(store: &PaneStore, socket: Option<&str>) -> Result<()
     if let Some(s) = socket {
         cmd.arg("-L").arg(s);
     }
+    // Separator is a SPACE, not \t: tmux <= 3.3 replaces tab characters in
+    // -F output with '_' (fixed in 3.4), which silently collapsed the whole
+    // line into one underscore-joined pane id on Debian 12 / Ubuntu 22.04.
+    // The free-text field (session_name, may itself contain spaces) goes
+    // LAST so splitn can hand it the remainder verbatim.
     let out = cmd
         .args([
             "list-panes",
             "-aF",
-            "#{pane_id}\t#{session_name}\t#{window_index}",
+            "#{pane_id} #{window_index} #{session_name}",
         ])
         .output()
         .await
@@ -397,14 +402,10 @@ async fn prepopulate_panes(store: &PaneStore, socket: Option<&str>) -> Result<()
     }
     let s = String::from_utf8_lossy(&out.stdout);
     for line in s.lines() {
-        let mut parts = line.split('\t');
-        let id = match parts.next() {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
+        let Some((id, window, session)) = parse_list_panes_line(line) else {
+            continue;
         };
-        let session = parts.next().map(String::from);
-        let window = parts.next().map(String::from);
-        let pane_id = PaneId(id.to_string());
+        let pane_id = PaneId(id);
         store
             .apply(SourceEvent::PaneAdded {
                 pane: pane_id.clone(),
@@ -418,4 +419,53 @@ async fn prepopulate_panes(store: &PaneStore, socket: Option<&str>) -> Result<()
     }
     info!("prepopulated {} panes", store.list().len());
     Ok(())
+}
+
+/// Parse one `list-panes -F "#{pane_id} #{window_index} #{session_name}"`
+/// line into `(pane_id, window, session)`. Lines whose first field doesn't
+/// look like a tmux pane id (`%<digits>`) are rejected — that's the canary
+/// for a tmux that mangled the format output (e.g. the tab→underscore
+/// substitution in tmux <= 3.3 that this format was redesigned around).
+fn parse_list_panes_line(line: &str) -> Option<(String, Option<String>, Option<String>)> {
+    let mut parts = line.splitn(3, ' ');
+    let id = match parts.next() {
+        Some(s) if !s.is_empty() => s,
+        _ => return None,
+    };
+    if !crate::is_raw_tmux_pane_id(id) {
+        warn!("list-panes returned unparseable pane id {id:?}; skipping line");
+        return None;
+    }
+    let window = parts.next().map(String::from);
+    let session = parts.next().map(String::from);
+    Some((id.to_string(), window, session))
+}
+
+#[cfg(test)]
+mod prepopulate_tests {
+    use super::parse_list_panes_line;
+
+    #[test]
+    fn plain_line() {
+        assert_eq!(
+            parse_list_panes_line("%0 0 work"),
+            Some(("%0".into(), Some("0".into()), Some("work".into())))
+        );
+    }
+
+    #[test]
+    fn session_name_with_spaces_survives() {
+        assert_eq!(
+            parse_list_panes_line("%12 3 my project notes"),
+            Some(("%12".into(), Some("3".into()), Some("my project notes".into())))
+        );
+    }
+
+    #[test]
+    fn mangled_or_garbage_first_field_is_rejected() {
+        // What a tab-separated format degraded to on tmux <= 3.3.
+        assert_eq!(parse_list_panes_line("%0_work_0"), None);
+        assert_eq!(parse_list_panes_line(""), None);
+        assert_eq!(parse_list_panes_line("not-a-pane 0 work"), None);
+    }
 }
