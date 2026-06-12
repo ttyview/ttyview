@@ -47,6 +47,31 @@
   function savePins()      { storage.set(STORAGE_KEY,    pins);     }
   function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
 
+  // Geometry diagnostics for the "section moves on toggle" report —
+  // lands in the daemon's diag.jsonl and the Client Logs tab. One
+  // record per render settle + a per-frame burst around toggles.
+  function logGeom(tag) {
+    try {
+      if (typeof window.ttvDiag !== 'function' || !mountedSlot) return;
+      const r = mountedSlot.getBoundingClientRect();
+      const acc = mountedSlot.closest('[data-slot]');
+      const ar = acc ? acc.getBoundingClientRect() : null;
+      const inp = document.getElementById('input-row');
+      window.ttvDiag('tabs-geom', {
+        tag: tag,
+        mode: settings.mode === 'all' ? 'all' : 'pinned',
+        slotH: Math.round(r.height * 10) / 10,
+        slotTop: Math.round(r.top * 10) / 10,
+        accH: ar ? Math.round(ar.height * 10) / 10 : -1,
+        accTop: ar ? Math.round(ar.top * 10) / 10 : -1,
+        inputTop: inp ? Math.round(inp.getBoundingClientRect().top * 10) / 10 : -1,
+        min: mountedSlot.style.minHeight,
+        max: mountedSlot.style.maxHeight,
+        kids: mountedSlot.children.length,
+      });
+    } catch (_) {}
+  }
+
   function resolvePin(pin, panes) {
     // pin.id is a fast-path *hint* — but tmux recycles pane ids
     // across server restarts. If the cached id now belongs to a
@@ -313,6 +338,7 @@
         // Restore scroll only after the cap re-creates the overflow —
         // setting scrollTop on an uncapped element clamps it to 0.
         if (prevScroll) mountedSlot.scrollTop = prevScroll;
+        logGeom('render-settle');
       });
     }
 
@@ -409,9 +435,17 @@
     btn.tabIndex = -1;
     btn.addEventListener('pointerup', function(e) {
       if (e.button !== undefined && e.button !== 0) return;
+      logGeom('pre-toggle');
       settings.mode = mode === 'pinned' ? 'all' : 'pinned';
       saveSettings();
       render();
+      // Per-frame burst: catches transients my after-the-settle
+      // measurements keep missing.
+      let f = 0;
+      (function burst() {
+        logGeom('toggle+f' + f);
+        if (++f < 8) requestAnimationFrame(burst);
+      })();
     });
     btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
     return { el: btn, label, fullText };
