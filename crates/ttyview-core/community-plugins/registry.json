@@ -146,6 +146,15 @@
       "source": "ttyview-stt.js"
     },
     {
+      "id": "ttyview-stt-groq",
+      "name": "Voice Input (Groq)",
+      "description": "Dictate into the message input with selectable engines: built-in Web Speech, or Groq Whisper + LLM cleanup (browser-direct, bring your own API key). Superset of ttyview-stt — bundle one or the other, not both.",
+      "version": "0.1.0",
+      "author": "ttyview",
+      "kind": "inputAccessory",
+      "source": "ttyview-stt-groq.js"
+    },
+    {
       "id": "ttyview-reload",
       "name": "Reload App",
       "description": "One-tap full app reload from a header button or the command palette. Handy inside installed PWAs (no URL bar) and while iterating on plugins.",
