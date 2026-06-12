@@ -1,27 +1,45 @@
-// ttyview-tabs — session tab area (pinned tabs / all sessions).
+// ttyview-tabs — session tab area (pinned tabs / all sessions),
+// grouped by project.
 //
-// Two view modes, switched by the leading 📌/▦ toggle button and
-// persisted in settings:
-//   - pinned: the curated pin list. Tap to switch panes, '+' pins the
-//     active pane, long-press a tab then tap × to unpin.
-//   - all: every tmux session, alphabetical. Tap to switch; long-press
-//     toggles that session's pin (pinned sessions show a 📌 mark).
+// Pinned mode renders pins as PROJECT GROUPS: a slim header row
+// (collapse caret, color dot, group name, count) above the group's
+// tab rows, the whole group bracketed by a colored line on the left.
+// Tabs keep their full session name (middle-ellipsis when tight) —
+// stripped-to-digit labels were tried and reverted: too cryptic.
+// Tapping a header collapses/expands that group. Groups are derived
+// from session names (`lingush-claude1` → group "lingush", label
+// "1"); a pin may carry an explicit `group` to override. Sessions
+// that don't match the pattern flow into a headerless ungrouped row
+// at the top. Long-press a header to enter move mode (▲▼ step the
+// group up/down; tap elsewhere to dismiss); explicit order persists
+// per group.
+//
+// A vertical utility rail sits on the RIGHT edge of the area (thumb
+// side): ▦ toggles the all-sessions view (every tmux session,
+// alphabetical; tap to switch, long-press to pin/unpin). The rail
+// replaced the leading 📌/▦ cell that used to occupy a tab slot.
+//
+// Status dots (tmux-web-style, per session, settings-toggleable):
+// amber pulsing = Claude Code permission prompt open (semantic
+// events), blue pulsing = recent output (idle_ms poll), orange =
+// finished since last viewed. See the "status dots" section below.
+//
 // Pin state persists via the per-plugin storage namespace, keyed by
 // SESSION NAME (with pane id kept as a fast-path resolver) — so the
 // tabs survive a tmux server restart that mints new pane ids, falling
-// back to session-name match. A pin may carry an optional 1-based
-// `row` to place it on a specific row of the grid (organize pins
-// into groups); unassigned pins flow into row 1.
+// back to session-name match. Legacy `row` fields on pins are ignored
+// (groups supersede manual row assignment). Per-group state (collapsed,
+// color override) lives under the `groups` storage key.
 //
 // The `rows` setting is both the reserved minimum height AND the
-// visible cap: when tabs need more rows, the area stays `rows` tall
-// and scrolls vertically.
+// visible cap: when groups need more height, the area stays `rows`
+// tab-rows tall and scrolls vertically.
 //
 // Default slot is above-input (bottom of the screen, by the thumb —
 // the tmux-web arrangement); movable via Settings → Layout.
 //
 // Two contributions sharing state via this IIFE's closure:
-//   - tabBar       — renders the tab buttons
+//   - tabBar       — renders the grouped tabs + rail
 //   - settingsTab  — Settings → Pinned Tabs: pin-all-sessions action,
 //                    rows count, max tabs per row
 (function() {
@@ -30,8 +48,11 @@
 
   const STORAGE_KEY = 'pins';
   const SETTINGS_KEY = 'settings';
+  const GROUPS_KEY = 'groups';
   const LONG_PRESS_MS = 500;
-  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned' };  // maxPerRow 0 = unlimited per row
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true };  // maxPerRow 0 = unlimited per row
+  const DOT_ACTIVE_MS = 4000;  // pane output within this window = "active"
+  const DOT_POLL_MS = 4000;    // /panes refresh cadence while mounted + visible
 
   const storage = tv.storage('ttyview-tabs');
 
@@ -41,28 +62,164 @@
     return Array.isArray(v) ? v : [];
   })();
   let settings = Object.assign({}, DEFAULTS, storage.get(SETTINGS_KEY) || {});
+  // Per-group UI state: { [groupName]: { collapsed?: bool, color?: '#rgb' } }
+  let groupsCfg = (function() {
+    const v = storage.get(GROUPS_KEY);
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  })();
   let editingId = null;
+  let movingGroup = null;       // group name in ▲▼ move mode (long-press a header)
+  let suppressHeadTap = false;  // swallow the pointerup that completes a header
+                                // long-press: render() replaces the header mid-
+                                // press, so without implicit touch capture
+                                // (i.e. with a mouse) the release lands on the
+                                // NEW element and would read as a fresh tap
   let mountedSlot = null;       // set by tabBar render(); null when not mounted
   let mountedSlotInitial = '';  // restore-on-unmount cssText
   let parentTouched = false;    // whether we've added .ttv-stacked-slot to parent
+  let contentEl = null;         // the vertically-scrolling column left of the rail
 
-  function savePins()      { storage.set(STORAGE_KEY,    pins);     }
-  function saveSettings()  { storage.set(SETTINGS_KEY,   settings); }
+  function savePins()      { storage.set(STORAGE_KEY,  pins);      }
+  function saveSettings()  { storage.set(SETTINGS_KEY, settings);  }
+  function saveGroups()    { storage.set(GROUPS_KEY,   groupsCfg); }
 
-  // External writers (ttyview-live-sync applying an agent's /api/state
-  // change, or another browser's edit) update our storage behind the
-  // closure's back — `pins`/`settings` are read once at load. Re-read
-  // and re-render when they tell us. Module-scope subscription: tab
-  // state must converge even while the tabBar is unmounted.
-  tv.on('storage-changed', function (e) {
-    if (!e || e.pluginId !== 'ttyview-tabs') return;
-    if (e.key === STORAGE_KEY) {
-      pins = Array.isArray(e.value) ? e.value : [];
-    } else if (e.key === SETTINGS_KEY) {
-      settings = Object.assign({}, DEFAULTS, e.value || {});
+  // Muted dark-theme palette — pure hues vibrate on dark backgrounds.
+  // Deterministic name→color so groups keep their color across
+  // devices with zero config; per-group override via groupsCfg.
+  const PALETTE = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7',
+                   '#7dcfff', '#f7768e', '#ff9e64', '#73daca'];
+  function groupColor(name) {
+    const cfg = groupsCfg[name];
+    if (cfg && cfg.color) return cfg.color;
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+
+  // Derive { group, label } from a session name, or null when the
+  // name doesn't look like "<project><n>". Handles the common
+  // conventions: mcc1 → mcc/1, lingush-claude2 → lingush/2,
+  // tmux-web4 → tmux-web/4, claude3 → claude/3.
+  function deriveGroup(session) {
+    // The agent-word suffix (claude/cc/agent) only strips when set off
+    // by a separator — otherwise "mcc1" would parse as group "m" + "cc".
+    const m = /^([a-zA-Z][\w.-]*?)(?:[-_](?:claude|cc|agent))?[-_]?(\d+)$/.exec(session || '');
+    if (!m || !m[1]) return null;
+    return { group: m[1], label: m[2] };
+  }
+  function pinGroup(pin) {
+    if (pin.group) return { group: pin.group, label: pin.session || pin.id || '?' };
+    return deriveGroup(pin.session);
+  }
+
+  // ---- status dots (per-session, tmux-web-style) ----
+  // Three states, strongest wins:
+  //   waiting   (amber, pulsing) — Claude Code permission prompt open
+  //               in some pane of the session. Driven by the
+  //               claude.permission_prompt / _resolved semantic events
+  //               (daemon-side detectors, all panes — needs the core
+  //               'semantic' plugin event; no-op on older daemons).
+  //   active    (blue, pulsing)  — some pane produced output within
+  //               DOT_ACTIVE_MS. Driven by idle_ms from a /panes poll.
+  //   attention (orange)         — was active, went idle while you
+  //               weren't viewing it; cleared when you switch to it.
+  const waitingPanes = new Map();   // paneId -> session (null until resolved)
+  let activeSessions = new Set();   // sessions with recent output
+  const attention = new Set();      // finished-since-viewed sessions
+  const DOT_RANK = { waiting: 3, active: 2, attention: 1 };
+
+  function dotsOn() { return settings.dots !== false; }
+
+  function sessionDot(session) {
+    if (!dotsOn() || !session) return null;
+    for (const s of waitingPanes.values()) {
+      if (s === session) return 'waiting';
+    }
+    if (activeSessions.has(session)) return 'active';
+    if (attention.has(session)) return 'attention';
+    return null;
+  }
+
+  function groupDotOf(items) {
+    let best = null;
+    for (const it of items) {
+      const d = sessionDot(it.pin.session);
+      if (d && (!best || DOT_RANK[d] > DOT_RANK[best])) best = d;
+    }
+    return best;
+  }
+
+  function makeDotEl(state) {
+    const el = document.createElement('span');
+    el.className = 'ttvtab-dot ' + state;
+    return el;
+  }
+
+  function updateDotState(panes) {
+    const activePane = tv.getActivePane();
+    const viewedSession = activePane ? activePane.session : null;
+    const live = new Set();
+    const nowActive = new Set();
+    for (const p of panes) {
+      live.add(p.session);
+      if (typeof p.idle_ms === 'number' && p.idle_ms < DOT_ACTIVE_MS) {
+        nowActive.add(p.session);
+      }
+    }
+    // active → idle transition while not being viewed = attention.
+    for (const s of activeSessions) {
+      if (!nowActive.has(s) && s !== viewedSession && live.has(s)) {
+        attention.add(s);
+      }
+    }
+    if (viewedSession) attention.delete(viewedSession);
+    for (const s of [...attention]) if (!live.has(s)) attention.delete(s);
+    activeSessions = nowActive;
+    // Prune waiting entries whose pane died (prompt can't resolve
+    // anymore) and late-resolve sessions for panes we couldn't map
+    // when the event arrived.
+    const byId = new Map(panes.map(p => [p.id, p.session]));
+    for (const [pid, sess] of [...waitingPanes]) {
+      if (!byId.has(pid)) waitingPanes.delete(pid);
+      else if (!sess) waitingPanes.set(pid, byId.get(pid));
+    }
+  }
+
+  // Module-scope wiring: these register BEFORE the tabBar contribution
+  // subscribes render, so by the time tabBar's own panes-updated /
+  // pane-changed handlers repaint, dot state is already fresh.
+  tv.on('panes-updated', function(list) {
+    if (!dotsOn()) return;
+    updateDotState(Array.isArray(list) ? list : tv.listPanes());
+  });
+  tv.on('pane-changed', function(e) {
+    if (!dotsOn() || !e || !e.to) return;
+    const p = tv.listPanes().find(x => x.id === e.to);
+    if (p) attention.delete(p.session);
+  });
+  tv.on('semantic', function(ev) {
+    if (!dotsOn() || !ev || !ev.name) return;
+    if (ev.name === 'claude.permission_prompt') {
+      const p = tv.listPanes().find(x => x.id === ev.pane);
+      waitingPanes.set(ev.pane, p ? p.session : null);
+    } else if (ev.name === 'claude.permission_resolved') {
+      waitingPanes.delete(ev.pane);
     } else return;
     render();
   });
+
+  // idle_ms only refreshes when /panes is re-fetched — poll while the
+  // tab area is mounted and the page is visible. refreshPanes emits
+  // panes-updated, which both updates dot state (above) and re-renders
+  // (tabBar's subscription).
+  let dotPollTimer = null;
+  function pollDots() {
+    if (!dotsOn() || document.visibilityState === 'hidden') return;
+    if (typeof tv.refreshPanes === 'function') tv.refreshPanes();
+  }
+  function onVisibilityPoll() {
+    if (document.visibilityState === 'visible') pollDots();
+  }
 
   // Geometry diagnostics for the "section moves on toggle" report —
   // lands in the daemon's diag.jsonl and the Client Logs tab. One
@@ -82,9 +239,9 @@
         accH: ar ? Math.round(ar.height * 10) / 10 : -1,
         accTop: ar ? Math.round(ar.top * 10) / 10 : -1,
         inputTop: inp ? Math.round(inp.getBoundingClientRect().top * 10) / 10 : -1,
-        min: mountedSlot.style.minHeight,
-        max: mountedSlot.style.maxHeight,
-        kids: mountedSlot.children.length,
+        min: contentEl ? contentEl.style.minHeight : '',
+        max: contentEl ? contentEl.style.maxHeight : '',
+        kids: contentEl ? contentEl.children.length : 0,
       });
     } catch (_) {}
   }
@@ -121,6 +278,7 @@
     st.textContent = `
       .ttvtab {
         flex: none;
+        position: relative;
         background: var(--ttv-bg-elev2);
         color: var(--ttv-fg);
         border: 1px solid var(--ttv-border);
@@ -218,6 +376,92 @@
         padding-left: 8px;
         padding-right: 8px;
       }
+      /* ---- project groups ---- */
+      .ttvtab-content {
+        display: flex; flex-direction: column; gap: 4px;
+        flex: 1 1 auto; min-width: 0;
+        overflow-y: auto;
+        scrollbar-width: none;
+      }
+      .ttvtab-content::-webkit-scrollbar { display: none; }
+      .ttvtab-group {
+        display: flex; flex-direction: column; gap: 4px;
+        border-left: 3px solid var(--ttv-border);
+        padding-left: 6px;
+        flex: none;
+        min-width: 0;
+      }
+      .ttvtab-ghead {
+        display: flex; align-items: center; gap: 6px;
+        /* Same height as tabs: a header is a primary tap target
+           (collapse/expand + long-press reorder), not a caption. */
+        height: 28px;
+        box-sizing: border-box;
+        /* A filled full-width bar, not a transparent caption — reads
+           as a real control on the black slot background. render()
+           overlays a per-group color tint inline (color-mix). */
+        background: var(--ttv-bg-elev2);
+        border: 1px solid var(--ttv-border);
+        border-radius: 4px;
+        padding: 0 8px;
+        font-family: inherit; font-size: 12px; line-height: 1;
+        color: var(--ttv-muted);
+        cursor: pointer;
+        user-select: none; -webkit-user-select: none;
+        touch-action: manipulation;
+        min-width: 0;
+      }
+      .ttvtab-ghead:active { filter: brightness(1.15); }
+      .ttvtab-ghead.gmoving {
+        background: var(--ttv-bg-elev2);
+        outline: 1px solid var(--ttv-accent);
+      }
+      .ttvtab-ghead .ttvtab-garrow {
+        flex: none; width: 38px; height: 24px;
+        background: var(--ttv-bg-elev2); color: var(--ttv-fg);
+        border: 1px solid var(--ttv-border); border-radius: 4px;
+        font-size: 12px; line-height: 1; font-family: inherit;
+        display: inline-flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        touch-action: manipulation;
+      }
+      .ttvtab-ghead .ttvtab-garrow:disabled { opacity: 0.35; }
+      .ttvtab-ghead .ttvtab-garrow:first-of-type { margin-left: auto; }
+      .ttvtab-ghead .ttvtab-gcaret { flex: none; font-size: 10px; width: 12px; text-align: left; }
+      .ttvtab-ghead .ttvtab-gdot {
+        flex: none; width: 8px; height: 8px; border-radius: 50%;
+      }
+      .ttvtab-ghead .ttvtab-gname {
+        font-weight: 600; color: var(--ttv-fg);
+        overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+      }
+      .ttvtab-ghead.gactive .ttvtab-gname { color: var(--ttv-accent); }
+      .ttvtab-ghead .ttvtab-gcount { flex: none; opacity: 0.7; }
+      /* ---- status dots ---- */
+      .ttvtab .ttvtab-dot {
+        position: absolute; top: 3px; right: 3px;
+        width: 7px; height: 7px; border-radius: 50%;
+        pointer-events: none;
+      }
+      /* On a (collapsed) group header the dot flows inline after the
+         count instead of overlaying a corner. */
+      .ttvtab-ghead .ttvtab-dot {
+        position: static; flex: none;
+        width: 7px; height: 7px; border-radius: 50%;
+        pointer-events: none;
+      }
+      .ttvtab-dot.waiting   { background: #f0c040; animation: ttvtab-dot-pulse 1.2s ease-in-out infinite; }
+      .ttvtab-dot.active    { background: #4a9eff; animation: ttvtab-dot-pulse 1s ease-in-out infinite; }
+      .ttvtab-dot.attention { background: #e8a828; }
+      @keyframes ttvtab-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+      /* ---- utility rail (right edge, thumb side) ---- */
+      .ttvtab-rail {
+        display: flex; flex-direction: column; gap: 4px;
+        flex: none;
+      }
+      .ttvtab-rail .ttvtab {
+        width: 32px; padding: 0; justify-content: center;
+      }
     `;
     document.head.appendChild(st);
   }
@@ -226,32 +470,227 @@
   let renderGen = 0;     // invalidates stale rAF callbacks across re-renders
   let lastHeightPx = ''; // carried across renders so the area never
                          // flashes to natural content height during the
-                         // cssText-reset → rAF-remeasure gap (visible as
-                         // a jump when toggling pinned ↔ all)
+                         // re-render → rAF-remeasure gap
   function render() {
     if (!mountedSlot) return;
     const gen = ++renderGen;
-    // Re-renders happen mid-interaction (pin/unpin, panes-updated) —
-    // keep the user's scroll position instead of jumping to the top.
-    const prevScroll = mountedSlot.scrollTop;
+    // Re-renders happen mid-interaction (pin/unpin, collapse,
+    // panes-updated) — keep the user's scroll position instead of
+    // jumping to the top.
+    const prevScroll = contentEl ? contentEl.scrollTop : 0;
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
     const active = tv.getActivePane();
     const mode = settings.mode === 'all' ? 'all' : 'pinned';
+    const rows = Math.max(1, settings.rows | 0);
+    const max  = Math.max(0, settings.maxPerRow | 0);
+    const fitMode = max > 0;
 
-    // Build row buckets. The mode toggle leads row 1 in both modes.
-    // Pins may carry an optional 1-based `row` to be placed on a
-    // specific row (organize pins into groups); unassigned pins flow
-    // into row 1. In all mode everything flows from row 1.
-    const buckets = [[{ kind: 'toggle', mode }]];
-    if (mode === 'pinned') {
-      for (const pin of pins) {
-        const r = Math.max(1, Math.min(9, (pin.row | 0) || 1));
-        while (buckets.length < r) buckets.push([]);
-        buckets[r - 1].push({ kind: 'pin', pin });
+    // Layout: [ content column (groups / rows, scrolls vertically) | rail ].
+    // The parent slot is row-flex by default — claim it as a column
+    // context (see .ttv-stacked-slot) so width:100% works and the
+    // quickkeys sibling keeps its own horizontal scroll.
+    mountedSlot.style.cssText = 'display:flex;flex-direction:row;gap:4px;width:100%;align-items:stretch;';
+    const parent = mountedSlot.parentNode;
+    if (parent) {
+      parent.classList.add('ttv-stacked-slot');
+      parentTouched = true;
+    }
+
+    const content = document.createElement('div');
+    content.className = 'ttvtab-content';
+    // Re-apply the last known height synchronously — the rAF below
+    // re-measures and refines, but without this the frame(s) in
+    // between render at content height and the section jumps.
+    if (lastHeightPx) {
+      content.style.minHeight = lastHeightPx;
+      content.style.maxHeight = lastHeightPx;
+    }
+    mountedSlot.appendChild(content);
+    contentEl = content;
+
+    const placedTabs = []; // { el, label, fullText } — for ellipsis pass
+
+    // Chunk `entries` into .ttvtab-row children of parentEl —
+    // maxPerRow per row in fit mode, one scrolling row otherwise.
+    function placeRows(parentEl, entries, make) {
+      if (!entries.length) return;
+      const chunk = fitMode ? max : entries.length;
+      for (let i = 0; i < entries.length; i += chunk) {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'ttvtab-row' + (fitMode ? ' fit' : '');
+        if (fitMode) rowEl.style.setProperty('--ttv-max-per-row', String(max));
+        for (const entry of entries.slice(i, i + chunk)) {
+          const made = make(entry);
+          if (!made) continue;
+          rowEl.appendChild(made.el);
+          if (fitMode) placedTabs.push(made);
+        }
+        parentEl.appendChild(rowEl);
       }
+    }
+
+    if (mode === 'pinned') {
+      // Partition pins into ungrouped + named groups (first-appearance
+      // order — pin order is user-controlled, groups inherit it).
+      const order = [];
+      const byGroup = {};
+      const ungrouped = [];
+      for (const pin of pins) {
+        const d = pinGroup(pin);
+        if (d && d.group) {
+          if (!byGroup[d.group]) { byGroup[d.group] = []; order.push(d.group); }
+          byGroup[d.group].push({ pin, label: d.label });
+        } else {
+          ungrouped.push({ pin, label: pin.session || pin.id || '?' });
+        }
+      }
+
+      // Explicit per-group order (written by ▲▼ move mode) wins over
+      // first-appearance order; ties keep appearance order so groups
+      // without a stored order slot in stably.
+      const appear = {};
+      order.forEach(function(n, i) { appear[n] = i; });
+      order.sort(function(a, b) {
+        const oa = (groupsCfg[a] && groupsCfg[a].order != null) ? groupsCfg[a].order : appear[a];
+        const ob = (groupsCfg[b] && groupsCfg[b].order != null) ? groupsCfg[b].order : appear[b];
+        return (oa - ob) || (appear[a] - appear[b]);
+      });
+      // Re-number the whole list and persist on every move so orders
+      // stay dense and unambiguous.
+      function commitOrder(list) {
+        list.forEach(function(n, i) {
+          groupsCfg[n] = Object.assign({}, groupsCfg[n], { order: i });
+        });
+        saveGroups();
+        render();
+      }
+
+      // Headerless ungrouped row first; the "+ pin current" chip lives
+      // here too (it applies to whatever session is active).
+      const ungroupedEntries = ungrouped.map(u => ({ kind: 'pin', pin: u.pin, label: u.label }));
       if (active && !pins.find(p => p.session === active.session)) {
-        buckets[0].push({ kind: 'add', active });
+        ungroupedEntries.push({ kind: 'add', active });
+      }
+      placeRows(content, ungroupedEntries, function(entry) {
+        if (entry.kind === 'add') return makeAddButton(entry.active, fitMode);
+        return makeTabButton(entry.pin, resolvePin(entry.pin, panes), active, fitMode);
+      });
+
+      for (const name of order) {
+        const items = byGroup[name];
+        const color = groupColor(name);
+        const collapsed = !!(groupsCfg[name] && groupsCfg[name].collapsed);
+        const hasActive = !!(active && items.some(it => it.pin.session === active.session));
+
+        const g = document.createElement('div');
+        g.className = 'ttvtab-group';
+        g.style.borderLeftColor = color;
+
+        // A div, not a button — move mode nests real <button> arrows
+        // inside, and buttons can't legally contain buttons.
+        const head = document.createElement('div');
+        head.setAttribute('role', 'button');
+        head.className = 'ttvtab-ghead' + (hasActive ? ' gactive' : '')
+          + (movingGroup === name ? ' gmoving' : '');
+        // Tint the bar toward the group color (subtle — 14% keeps text
+        // contrast). Falls back to the stock elev2 fill from the CSS
+        // class on browsers without color-mix.
+        if (window.CSS && CSS.supports && CSS.supports('background', 'color-mix(in srgb, red 10%, black)')) {
+          head.style.background = 'color-mix(in srgb, ' + color + ' 14%, var(--ttv-bg-elev2))';
+        }
+        const caret = document.createElement('span');
+        caret.className = 'ttvtab-gcaret';
+        caret.textContent = collapsed ? '▸' : '▾';
+        const dot = document.createElement('span');
+        dot.className = 'ttvtab-gdot';
+        dot.style.background = color;
+        const nm = document.createElement('span');
+        nm.className = 'ttvtab-gname';
+        nm.textContent = name;
+        const cnt = document.createElement('span');
+        cnt.className = 'ttvtab-gcount';
+        cnt.textContent = String(items.length);
+        head.appendChild(caret);
+        head.appendChild(dot);
+        head.appendChild(nm);
+        head.appendChild(cnt);
+        // Collapsed groups surface their members' strongest status —
+        // a hidden waiting prompt must not be silenced by collapsing.
+        if (collapsed) {
+          const gd = groupDotOf(items);
+          if (gd) head.appendChild(makeDotEl(gd));
+        }
+        head.title = (collapsed ? 'Expand ' : 'Collapse ') + name +
+          ' (' + items.length + ' session' + (items.length === 1 ? '' : 's') +
+          ') — long-press to reorder';
+        head.tabIndex = -1;
+
+        // Move mode: ▲▼ on the right edge of this header.
+        if (movingGroup === name) {
+          const idx = order.indexOf(name);
+          function arrow(glyph, delta, disabled) {
+            const a = document.createElement('button');
+            a.type = 'button';
+            a.className = 'ttvtab-garrow';
+            a.textContent = glyph;
+            a.disabled = disabled;
+            a.title = delta < 0 ? 'Move group up' : 'Move group down';
+            a.addEventListener('pointerdown', function(e) { e.stopPropagation(); });
+            a.addEventListener('pointerup', function(e) {
+              e.stopPropagation();
+              const list = order.slice();
+              list.splice(idx, 1);
+              list.splice(idx + delta, 0, name);
+              commitOrder(list);  // saves + re-renders; move mode stays on
+            });
+            a.addEventListener('mousedown', function(e) { e.preventDefault(); });
+            return a;
+          }
+          head.appendChild(arrow('▲', -1, idx === 0));
+          head.appendChild(arrow('▼', +1, idx === order.length - 1));
+        }
+
+        // Tap = collapse/expand; long-press = enter/leave move mode;
+        // tap while moving = leave move mode (don't also collapse).
+        let headTimer = null;
+        let headLong = false;
+        function clearHeadTimer() {
+          if (headTimer) { clearTimeout(headTimer); headTimer = null; }
+        }
+        head.addEventListener('pointerdown', function() {
+          headLong = false;
+          suppressHeadTap = false;  // a new gesture invalidates any stale swallow
+          clearHeadTimer();
+          headTimer = setTimeout(function() {
+            headLong = true;
+            suppressHeadTap = true;
+            movingGroup = movingGroup === name ? null : name;
+            render();
+          }, LONG_PRESS_MS);
+        });
+        head.addEventListener('pointerup', function(e) {
+          clearHeadTimer();
+          if (headLong) { headLong = false; suppressHeadTap = false; return; }
+          if (suppressHeadTap) { suppressHeadTap = false; return; }
+          if (e.button !== undefined && e.button !== 0) return;
+          if (movingGroup !== null) { movingGroup = null; render(); return; }
+          groupsCfg[name] = Object.assign({}, groupsCfg[name],
+            { collapsed: !collapsed });
+          saveGroups();
+          render();
+        });
+        head.addEventListener('pointerleave',  function() { clearHeadTimer(); headLong = false; });
+        head.addEventListener('pointercancel', function() { clearHeadTimer(); headLong = false; });
+        head.addEventListener('mousedown', function(e) { e.preventDefault(); });
+        g.appendChild(head);
+
+        if (!collapsed) {
+          placeRows(g, items, function(it) {
+            return makeTabButton(it.pin, resolvePin(it.pin, panes), active, fitMode);
+          });
+        }
+        content.appendChild(g);
       }
     } else {
       // Every session, one tab each, alphabetical.
@@ -261,119 +700,38 @@
         if (!seen.has(p.session)) { seen.add(p.session); sessions.push(p); }
       }
       sessions.sort((a, b) => String(a.session).localeCompare(String(b.session)));
-      for (const p of sessions) buckets[0].push({ kind: 'sess', pane: p });
-    }
-
-    // Distribute into rows. In fit mode (max > 0) each bucket chunks
-    // strictly by maxPerRow (an overfull bucket spills into extra
-    // rows); the `rows` setting is the visible height. Without max,
-    // row assignments are ignored — a single horizontally-scrolling
-    // row.
-    const rows = Math.max(1, settings.rows | 0);
-    const max  = Math.max(0, settings.maxPerRow | 0);
-    let groups;
-    if (max === 0) {
-      groups = [buckets.flat()];
-    } else {
-      groups = [];
-      for (const bucket of buckets) {
-        if (bucket.length === 0) { groups.push([]); continue; }
-        for (let i = 0; i < bucket.length; i += max) {
-          groups.push(bucket.slice(i, i + max));
-        }
-      }
-      while (groups.length < rows) groups.push([]);
-    }
-
-    // Container layout. Fit mode (maxPerRow > 0) always stacks rows
-    // vertically so each row independently fits its slice to row
-    // width. Without fit mode, single-row uses the original inline
-    // flex on the slot; multi-row stacks.
-    const fitMode = max > 0;
-    const needsOwnRow = groups.length > 1 || fitMode;
-    if (needsOwnRow) {
-      // Width:100% claims the row in the (now-column-flex) parent.
-      // Do NOT set flex-basis:100% — in a column-flex parent that
-      // applies to height and makes us claim the entire slot, which
-      // visibly inflates row heights / inter-row gaps.
-      mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
-      // Re-apply the last known height synchronously — the rAF below
-      // re-measures and refines, but without this the frame(s) in
-      // between render at content height and the section jumps.
-      if (lastHeightPx) {
-        mountedSlot.style.minHeight = lastHeightPx;
-        mountedSlot.style.maxHeight = lastHeightPx;
-        mountedSlot.style.overflowY = 'auto';
-      }
-      // When the host slot is a row-flex container (the default for
-      // above-input and above-grid), our column-of-tab-rows would
-      // either get pushed off horizontally OR stretch the row's
-      // height — visible as "tabs vanished + sibling buttons very
-      // tall". Apply .ttv-stacked-slot to the parent: flips it to
-      // column, kills its own overflow-x so the keys-row scroll
-      // doesn't drag the tabs along, and gives each child its own
-      // independent horizontal scroll.
-      const parent = mountedSlot.parentNode;
-      if (parent) {
-        parent.classList.add('ttv-stacked-slot');
-        parentTouched = true;
-      }
-    } else {
-      mountedSlot.style.cssText = mountedSlotInitial;
-      const parent = mountedSlot.parentNode;
-      if (parent && parentTouched) {
-        parent.classList.remove('ttv-stacked-slot');
-        parentTouched = false;
-      }
-    }
-
-    const placedTabs = []; // { el, label, fullText } — for ellipsis pass
-    for (const group of groups) {
-      const rowEl = (groups.length > 1 || fitMode)
-        ? Object.assign(document.createElement('div'), { className: 'ttvtab-row' + (fitMode ? ' fit' : '') })
-        : mountedSlot;
-      if (rowEl !== mountedSlot) mountedSlot.appendChild(rowEl);
-      if (fitMode) rowEl.style.setProperty('--ttv-max-per-row', String(max));
-      for (const item of group) {
-        let made = null;
-        if (item.kind === 'pin') {
-          const resolved = resolvePin(item.pin, panes);
-          made = makeTabButton(item.pin, resolved, active, fitMode);
-        } else if (item.kind === 'add') {
-          made = makeAddButton(item.active, fitMode);
-        } else if (item.kind === 'toggle') {
-          made = makeToggleButton(item.mode, fitMode);
-        } else if (item.kind === 'sess') {
-          made = makeSessionButton(item.pane, active, fitMode);
-        }
-        if (!made) continue;
-        rowEl.appendChild(made.el);
-        if (fitMode) placedTabs.push(made);
-      }
-    }
-
-    // Constant visible height: the area is ALWAYS exactly `rows` rows
-    // tall — fewer tabs leave empty space, more tabs scroll vertically.
-    // min-height == max-height so toggling pinned ↔ all (or pinning /
-    // unpinning) never shifts the layout around it. Measured (not
-    // hardcoded) row height so font-size / padding changes don't
-    // desync; the first row always has content (the mode toggle).
-    if (needsOwnRow) {
-      requestAnimationFrame(function() {
-        if (gen !== renderGen || !mountedSlot) return;
-        const first = mountedSlot.firstElementChild;
-        if (!first || !first.offsetHeight) return;
-        const px = (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
-        lastHeightPx = px;
-        mountedSlot.style.minHeight = px;
-        mountedSlot.style.maxHeight = px;
-        mountedSlot.style.overflowY = 'auto';
-        // Restore scroll only after the cap re-creates the overflow —
-        // setting scrollTop on an uncapped element clamps it to 0.
-        if (prevScroll) mountedSlot.scrollTop = prevScroll;
-        logGeom('render-settle');
+      placeRows(content, sessions, function(p) {
+        return makeSessionButton(p, active, fitMode);
       });
     }
+
+    // Utility rail — right edge (thumb side). Hard cap by design: if
+    // this ever wants more buttons than fit the area height, those
+    // belong in an overlay, not a scrolling rail.
+    const rail = document.createElement('div');
+    rail.className = 'ttvtab-rail';
+    rail.appendChild(makeRailToggle(mode));
+    mountedSlot.appendChild(rail);
+
+    // Constant visible height: the content column is ALWAYS exactly
+    // `rows` tab-rows tall — fewer tabs leave empty space, more tabs
+    // (or expanded groups) scroll vertically. min == max so collapse /
+    // expand / mode toggles never shift the layout around the area.
+    // Measured (not hardcoded) tab height so font-size / padding
+    // changes don't desync.
+    requestAnimationFrame(function() {
+      if (gen !== renderGen || !mountedSlot) return;
+      const tab = mountedSlot.querySelector('.ttvtab');
+      const h = (tab && tab.offsetHeight) ? tab.offsetHeight : 28;
+      const px = (rows * h + (rows - 1) * 4) + 'px';
+      lastHeightPx = px;
+      content.style.minHeight = px;
+      content.style.maxHeight = px;
+      // Restore scroll only after the cap re-creates the overflow —
+      // setting scrollTop on an uncapped element clamps it to 0.
+      if (prevScroll) content.scrollTop = prevScroll;
+      logGeom('render-settle');
+    });
 
     if (fitMode && placedTabs.length) {
       // Run after layout settles so each label sees its real width.
@@ -406,7 +764,10 @@
     el.textContent = fullText.slice(0, first) + '…' + fullText.slice(n - last);
   }
 
-  function makeTabButton(pin, resolved, active, fitMode) {
+  // labelText: display label (group-stripped, e.g. "1"); the tab's
+  // title always carries the full session name so identity is never
+  // ambiguous.
+  function makeTabButton(pin, resolved, active, fitMode, labelText) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ttvtab';
@@ -416,14 +777,16 @@
     else if (active && resolved.id === active.id) btn.classList.add('active');
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
-    const fullText = pin.session || pin.id || '?';
+    const fullText = labelText || pin.session || pin.id || '?';
     label.textContent = fullText;
-    btn.title = fullText;
+    btn.title = pin.session || pin.id || '?';
     btn.appendChild(label);
     const xs = document.createElement('span');
     xs.className = 'ttvtab-x';
     xs.textContent = '×';
     btn.appendChild(xs);
+    const dot = sessionDot(pin.session || (resolved && resolved.session));
+    if (dot) btn.appendChild(makeDotEl(dot));
     attachTapHandlers(btn, pin, resolved);
     return { el: btn, label, fullText };
   }
@@ -450,20 +813,20 @@
     return { el: add, label, fullText };
   }
 
-  // Leading mode toggle — shows the CURRENT mode, tap to switch.
-  function makeToggleButton(mode, fitMode) {
+  // Rail ▦ — shows/hides the all-sessions view. Lit (active) while in
+  // all mode so the rail doubles as a mode indicator.
+  function makeRailToggle(mode) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'ttvtab ttvtab-add';
-    if (fitMode) btn.classList.add('fit');
+    btn.className = 'ttvtab';
+    if (mode === 'all') btn.classList.add('active');
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
-    const fullText = mode === 'pinned' ? '📌' : '▦ all';
-    label.textContent = fullText;
+    label.textContent = '▦';
     btn.appendChild(label);
     btn.title = mode === 'pinned'
-      ? 'Showing pinned tabs — tap to show all sessions'
-      : 'Showing all sessions — tap to show pinned tabs';
+      ? 'Show all sessions'
+      : 'Back to pinned tabs';
     btn.setAttribute('aria-label', btn.title);
     btn.tabIndex = -1;
     btn.addEventListener('pointerup', function(e) {
@@ -472,7 +835,7 @@
       settings.mode = mode === 'pinned' ? 'all' : 'pinned';
       saveSettings();
       render();
-      // Per-frame burst: catches transients my after-the-settle
+      // Per-frame burst: catches transients the after-the-settle
       // measurements keep missing.
       let f = 0;
       (function burst() {
@@ -481,7 +844,7 @@
       })();
     });
     btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
-    return { el: btn, label, fullText };
+    return btn;
   }
 
   // All-sessions mode tab. Tap switches; long-press toggles the pin.
@@ -504,6 +867,8 @@
       btn.appendChild(mark);
     }
     btn.title = fullText + (isPinned ? ' (pinned — long-press to unpin)' : ' (long-press to pin)');
+    const dot = sessionDot(pane.session);
+    if (dot) btn.appendChild(makeDotEl(dot));
     btn.tabIndex = -1;
 
     let pressTimer = null;
@@ -593,8 +958,6 @@
       mountedSlot = slot;
       mountedSlotInitial = slot.style.cssText;
 
-      // Re-read settings on each render so settings-tab edits take
-      // effect even though they live in a different DOM tree.
       const off1 = tv.on('pane-changed',  render);
       const off2 = tv.on('panes-updated', render);
 
@@ -605,14 +968,36 @@
         }
       });
 
+      // Move mode dismisses on a tap ANYWHERE outside a group header —
+      // document-level because the natural "put it away" tap is on the
+      // terminal, not inside the tab slot.
+      function onDocClick(e) {
+        if (movingGroup !== null && !e.target.closest('.ttvtab-ghead')) {
+          movingGroup = null;
+          render();
+        }
+      }
+      document.addEventListener('click', onDocClick);
+
+      // Status-dot freshness: poll /panes while mounted + visible,
+      // and immediately on returning to the foreground (the phone
+      // resume path — intervals were clamped/frozen while hidden).
+      dotPollTimer = setInterval(pollDots, DOT_POLL_MS);
+      document.addEventListener('visibilitychange', onVisibilityPoll);
+
       render();
       return function unmount() {
         off1(); off2();
+        clearInterval(dotPollTimer);
+        dotPollTimer = null;
+        document.removeEventListener('click', onDocClick);
+        document.removeEventListener('visibilitychange', onVisibilityPoll);
         if (mountedSlot && parentTouched && mountedSlot.parentNode) {
           mountedSlot.parentNode.classList.remove('ttv-stacked-slot');
         }
         parentTouched = false;
         mountedSlot = null;
+        contentEl = null;
       };
     },
   });
@@ -628,7 +1013,7 @@
       container.innerHTML = '';
       const intro = document.createElement('p');
       intro.style.cssText = 'color:var(--ttv-muted);font-size:12px;margin:0 0 16px;';
-      intro.textContent = 'Customize the pinned tabs row. State is per-browser (localStorage). Changes apply immediately.';
+      intro.textContent = 'Customize the pinned tabs area. Tabs are grouped by project (derived from session names). State is per-browser (localStorage). Changes apply immediately.';
       container.appendChild(intro);
 
       function makeRow(label, hint) {
@@ -687,8 +1072,22 @@
       r1.appendChild(statusEl);
       container.appendChild(r1);
 
+      // Expand all groups (recovery action; group state is otherwise
+      // managed from the headers themselves).
+      const rG = makeRow('Groups', 'Groups derive from session names (mcc1 → "mcc"). Tap a group header to collapse/expand it; long-press a header to reorder groups with ▲▼.');
+      const expandAll = btn('Expand all groups');
+      expandAll.addEventListener('click', function() {
+        for (const k of Object.keys(groupsCfg)) {
+          if (groupsCfg[k]) delete groupsCfg[k].collapsed;
+        }
+        saveGroups();
+        render();
+      });
+      rG.appendChild(expandAll);
+      container.appendChild(rG);
+
       // Rows
-      const r2 = makeRow('Number of rows', 'Visible height of the tab area, in rows (needs Max tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
+      const r2 = makeRow('Number of rows', 'Visible height of the tab area, in tab-rows (needs Max tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
       const rowsInp = document.createElement('input');
       rowsInp.type = 'number'; rowsInp.min = '1'; rowsInp.max = '5';
       rowsInp.value = String(settings.rows);
@@ -700,6 +1099,24 @@
       });
       r2.appendChild(rowsInp);
       container.appendChild(r2);
+
+      // Status dots
+      const rD = makeRow('Status dots', 'Per-session dot on each tab: amber pulsing = Claude Code waiting on a permission prompt, blue pulsing = producing output, orange = finished since you last viewed it. Collapsed groups show their strongest member dot.');
+      const dotsLbl = document.createElement('label');
+      dotsLbl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);cursor:pointer;';
+      const dotsChk = document.createElement('input');
+      dotsChk.type = 'checkbox';
+      dotsChk.checked = settings.dots !== false;
+      dotsChk.addEventListener('change', function() {
+        settings.dots = dotsChk.checked;
+        saveSettings();
+        if (settings.dots) pollDots();
+        render();
+      });
+      dotsLbl.appendChild(dotsChk);
+      dotsLbl.appendChild(document.createTextNode('Show status dots'));
+      rD.appendChild(dotsLbl);
+      container.appendChild(rD);
 
       // Max per row
       const r3 = makeRow('Max tabs per row', 'When > 0, each row holds exactly this many tabs distributed equally with no horizontal overflow; long names truncate with middle-ellipsis (start…end). 0 = unlimited, single horizontal scroll.');
