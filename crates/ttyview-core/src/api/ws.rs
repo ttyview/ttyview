@@ -439,6 +439,28 @@ async fn handle_client_msg(
             }
         }
         ClientMsg::Resize { pane, cols, rows } => {
+            // read-only mode: same policy as Input — demo / spectator
+            // visitors must not reshape the host's tmux windows. Ack
+            // ok=false rather than disconnecting so the client's
+            // auto fit-resize fails quietly.
+            if app.read_only {
+                tracing::debug!(
+                    target: "ttyview::ws::resize",
+                    pane = %pane,
+                    cols,
+                    rows,
+                    "resize dropped: read-only mode"
+                );
+                let reply = ServerReply::Ack {
+                    for_kind: "resize".into(),
+                    ok: false,
+                    message: Some("read-only mode".into()),
+                };
+                sender
+                    .send(Message::Text(serde_json::to_string(&reply)?))
+                    .await?;
+                return Ok(());
+            }
             // `resize-pane` is silently a no-op when there's only one pane in
             // a window (the pane fills the window already). To actually change
             // the drawable area we resize the WINDOW that owns this pane —
