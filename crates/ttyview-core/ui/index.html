@@ -918,6 +918,12 @@ window.ttyview = (function() {
   function on(event, handler) {
     if (!eventListeners.has(event)) eventListeners.set(event, new Set());
     eventListeners.get(event).add(handler);
+    // Semantic events for BACKGROUND panes only flow if we ask the
+    // daemon for them — the first 'semantic' listener turns on the
+    // all-panes kinds:['semantic'] subscriptions (see
+    // enableSemanticWatch). Lazy so clients with no interested
+    // plugin pay nothing.
+    if (event === 'semantic') enableSemanticWatch();
     return () => eventListeners.get(event)?.delete(handler);
   }
   function makeContributor(kind) {
@@ -962,6 +968,11 @@ window.ttyview = (function() {
     apiVersion: 1,
     // === Pane state + actions ===
     listPanes: function() { return panesCache.slice(); },
+    // Re-fetch /panes (refreshes idle_ms etc.) and emit
+    // 'panes-updated'. Returns the fresh list. Plugins that poll
+    // pane state (status dots) use this instead of fetching the
+    // endpoint themselves.
+    refreshPanes: function() { return loadPanes(); },
     getActivePane: function() {
       return panesCache.find(function(p) { return p.id === activePaneId; }) || null;
     },
@@ -1006,6 +1017,8 @@ window.ttyview = (function() {
     // === Events ===
     // Emitted: 'pane-changed', 'panes-updated', 'grid-loaded',
     //          'cell-diff', 'scrollback-append',
+    //          'semantic' ({ pane, name, at_gen, data } — detector
+    //          events for ALL panes, not just the active one),
     //          '{kind}-registered', '{kind}-unregistered'.
     on: on,
     // === Contribution points ===
@@ -1409,6 +1422,55 @@ function setStatus(text, cls) {
 
 let panesCache = [];
 
+// === Semantic watch — detector events for ALL panes ===
+// The active pane's full subscription already carries semantic
+// events, but plugins showing per-tab status (permission-prompt
+// dots) need them for background panes too. When any plugin
+// registers a 'semantic' listener, subscribe kinds:['semantic'] to
+// every known pane and keep those subs alive across pane switches
+// (the daemon's unsub drops ALL subs for a pane) and reconnects.
+// The active pane then delivers each semantic event twice (full sub
+// + semantic sub) — dedup by pane|name|at_gen before emitting.
+let semanticWatchOn = false;
+const semanticSubs = new Set();   // pane ids with a live semantic-only sub
+const seenSemantic = new Map();   // dedup key -> ts
+
+function enableSemanticWatch() {
+  if (semanticWatchOn) return;
+  semanticWatchOn = true;
+  syncSemanticSubs();
+}
+
+function syncSemanticSubs() {
+  if (!semanticWatchOn || !ws || ws.readyState !== WebSocket.OPEN) return;
+  for (const p of panesCache) {
+    if (semanticSubs.has(p.id)) continue;
+    try {
+      ws.send(JSON.stringify({ t: 'sub', p: p.id, kinds: ['semantic'] }));
+      semanticSubs.add(p.id);
+    } catch (e) { break; }
+  }
+}
+
+function handleSemanticMsg(msg) {
+  const ev = msg.event || {};
+  const key = msg.p + '|' + ev.name + '|' + ev.at_gen;
+  const now = Date.now();
+  const seenAt = seenSemantic.get(key);
+  if (seenAt && now - seenAt < 10000) return;
+  seenSemantic.set(key, now);
+  if (seenSemantic.size > 200) {
+    for (const [k, ts] of seenSemantic) {
+      if (now - ts > 10000) seenSemantic.delete(k);
+    }
+  }
+  try {
+    window.ttyview._internal.emit('semantic', {
+      pane: msg.p, name: ev.name, at_gen: ev.at_gen, data: ev.data,
+    });
+  } catch (e) { console.error('semantic handler threw', e); }
+}
+
 // Active-pane button label. Just the session name when unambiguous;
 // adds a "(N)" suffix when the same session has multiple panes (1-
 // indexed by position in panesCache for stable numbering across
@@ -1505,6 +1567,7 @@ async function loadPanes() {
     const r = await fetch('/panes');
     const list = await r.json();
     panesCache = list || [];
+    syncSemanticSubs();
     try { window.ttyview._internal.emit('panes-updated', panesCache.slice()); } catch {}
     $select.innerHTML = '';
     if (!list || list.length === 0) {
@@ -1563,6 +1626,9 @@ function connectWs() {
     setStatus('connected', 'connected');
     wsRetryMs = 1000;
     ttvDiag('ws', { ev: 'open', pane: activePaneId });
+    // Fresh socket — every previous sub is gone server-side.
+    semanticSubs.clear();
+    syncSemanticSubs();
     if (activePaneId) {
       ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
       // Resync the grid: cell-diffs are deltas, and anything emitted
@@ -1602,6 +1668,18 @@ function connectWs() {
       console.error('[ttyview] server err', msg);
       ttvDiag('server-err', { message: msg.message });
       return;
+    }
+    // Semantic events and pane closures concern BACKGROUND panes
+    // too — handle them before the active-pane filter.
+    if (msg.t === 'semantic') {
+      handleSemanticMsg(msg);
+      return;
+    }
+    if (msg.t === 'closed') {
+      // The daemon dropped every sub for this pane with the slot;
+      // forget our semantic sub so the next syncSemanticSubs()
+      // (panes refresh) re-subscribes if the pane comes back.
+      semanticSubs.delete(msg.p);
     }
     if (msg.p !== activePaneId) return;
     if (msg.t === 'cell-diff') {
@@ -1760,6 +1838,11 @@ async function selectPane(paneId) {
   setStatus('loading ' + paneId + '…');
   if (ws && ws.readyState === WebSocket.OPEN && prevPaneId) {
     ws.send(JSON.stringify({ t: 'unsub', p: prevPaneId }));
+    // unsub drops ALL of prevPane's subs server-side, including the
+    // semantic-only one — restore it so background status keeps
+    // flowing for the pane we just left.
+    semanticSubs.delete(prevPaneId);
+    syncSemanticSubs();
   }
   const tSync = performance.now();
   await loadGrid(paneId);
