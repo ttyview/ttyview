@@ -68,6 +68,17 @@
     push('unhandledrejection', (r && r.message) || String(r));
   });
 
+  // --- custom user/plugin logs ---
+  // window.ttyviewLog('my-tag', {...}) from any plugin, the console,
+  // or ad-hoc instrumentation. Kept separate from the core diag
+  // stream so the viewer can filter "what the platform saw" vs
+  // "what I added while debugging".
+  window.ttyviewLog = function(tag, data) {
+    try {
+      push('custom', String(tag) + (data !== undefined ? ' ' + JSON.stringify(data) : ''));
+    } catch (_) {}
+  };
+
   push('diag', 'ttyview-logs capture installed');
 
   function fmtTs(ts) {
@@ -82,7 +93,17 @@
     unhandledrejection: '#f48771',
     warn: '#dcdcaa',
     diag: 'var(--ttv-muted)',
+    custom: 'var(--ttv-accent)',
   };
+
+  // Source filter groups: core diag stream vs errors vs custom logs.
+  const FILTERS = [
+    { id: 'all',    label: 'All',    match: () => true },
+    { id: 'diag',   label: 'Core',   match: k => k === 'diag' },
+    { id: 'errors', label: 'Errors', match: k => k === 'error' || k === 'warn' || k === 'uncaught' || k === 'unhandledrejection' },
+    { id: 'custom', label: 'Custom', match: k => k === 'custom' },
+  ];
+  let activeFilter = 'all';
 
   tv.contributes.settingsTab({
     id: 'ttyview-logs',
@@ -91,7 +112,7 @@
       container.innerHTML = '';
 
       const bar = document.createElement('div');
-      bar.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:10px;';
+      bar.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:10px;flex-wrap:wrap;';
       function mkBtn(label) {
         const b = document.createElement('button');
         b.type = 'button';
@@ -108,16 +129,42 @@
       bar.appendChild(count);
       container.appendChild(bar);
 
+      // Source filter chips.
+      const filterBar = document.createElement('div');
+      filterBar.style.cssText = 'display:flex;gap:6px;margin-bottom:10px;';
+      const chipBtns = {};
+      function syncChips() {
+        for (const f of FILTERS) {
+          const on = activeFilter === f.id;
+          chipBtns[f.id].style.borderColor = on ? 'var(--ttv-accent)' : 'var(--ttv-border)';
+          chipBtns[f.id].style.color = on ? 'var(--ttv-accent)' : 'var(--ttv-muted)';
+        }
+      }
+      for (const f of FILTERS) {
+        const chip = mkBtn(f.label);
+        chip.style.padding = '4px 10px';
+        chip.addEventListener('click', function() {
+          activeFilter = f.id;
+          syncChips();
+          paint();
+        });
+        chipBtns[f.id] = chip;
+        filterBar.appendChild(chip);
+      }
+      container.appendChild(filterBar);
+
       const list = document.createElement('div');
       list.style.cssText = 'font: 11px/1.5 ui-monospace, monospace; overflow-wrap: anywhere;';
       container.appendChild(list);
 
       function paint() {
-        count.textContent = buf.length + ' entries';
+        const flt = FILTERS.find(f => f.id === activeFilter) || FILTERS[0];
+        const visible = buf.filter(e => flt.match(e.kind));
+        count.textContent = visible.length + (activeFilter === 'all' ? '' : '/' + buf.length) + ' entries';
         list.innerHTML = '';
         // Newest first — the thing you're debugging just happened.
-        for (let i = buf.length - 1; i >= 0; i--) {
-          const e = buf[i];
+        for (let i = visible.length - 1; i >= 0; i--) {
+          const e = visible[i];
           const row = document.createElement('div');
           row.style.cssText = 'padding:2px 0;border-bottom:1px solid var(--ttv-border);color:' + (KIND_COLOR[e.kind] || 'var(--ttv-fg)') + ';';
           row.textContent = fmtTs(e.ts) + ' [' + e.kind + '] ' + e.text;
@@ -136,6 +183,7 @@
         paint();
       });
 
+      syncChips();
       paint();
       painters.push({ paint, root: list });
     },
