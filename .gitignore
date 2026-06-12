@@ -25,3 +25,8 @@ eval-results/
 # files — same name, different purpose, too confusing.)
 STATUS.md
 AGENT_LOG.md
+
+# Agent workdirs (per-session checkouts/scratch) + the root node_modules
+# symlink into tests/e2e
+/claude*/
+/node_modules
