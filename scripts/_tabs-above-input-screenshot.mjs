@@ -83,17 +83,21 @@ const inv = await page.evaluate(() => {
   const slotRect = slot.getBoundingClientRect();
   const children = Array.from(slot.children).map(c => {
     const ccs = getComputedStyle(c);
+    const r = c.getBoundingClientRect();
     return {
       pluginId: c.dataset.pluginId,
       overflowX: ccs.overflowX,
       scrollW: c.scrollWidth,
       clientW: c.clientWidth,
       independentlyScrollable: c.scrollWidth > c.clientWidth + 1,
+      y: Math.round(r.y),
+      h: Math.round(r.height),
       tabs: Array.from(c.querySelectorAll('.ttvtab')).map(t => ({
         text: t.querySelector('.ttvtab-label')?.textContent,
         full: t.title,
         active: t.classList.contains('active'),
         missing: t.classList.contains('missing'),
+        h: Math.round(t.getBoundingClientRect().height),
       })),
     };
   });
