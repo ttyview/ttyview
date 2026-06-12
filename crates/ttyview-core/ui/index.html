@@ -604,6 +604,7 @@
 <div id="top-bar" data-slot="top-bar" hidden></div>
 
 <header>
+  <span id="header-left-widgets" data-slot="header-left"><!-- plugin-rendered widgets land here (e.g. a brand glyph) --></span>
   <span class="title">ttyview</span>
   <span class="sep">·</span>
   <button id="pane-picker-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
@@ -1141,6 +1142,7 @@ window.ttyview = (function() {
   // dropdown (top to bottom of the page).
   const SLOTS = [
     { id: 'top-bar',      name: 'Top bar' },
+    { id: 'header-left',  name: 'Header (left)' },
     { id: 'header-right', name: 'Header (right)' },
     { id: 'above-grid',   name: 'Above grid' },
     { id: 'below-grid',   name: 'Below grid' },
@@ -1156,6 +1158,7 @@ window.ttyview = (function() {
   const SLOT_KINDS = ['headerWidget', 'tabBar', 'inputAccessory'];
   const SLOT_INNER_CLASS = {
     'top-bar':      'hw-slot',
+    'header-left':  'hw-slot',
     'header-right': 'hw-slot',
     'above-grid':   'tb-slot',
     'below-grid':   'tb-slot',
@@ -1184,9 +1187,9 @@ window.ttyview = (function() {
   }
   function refreshVisibility() {
     // Hide slot containers that have no inner mounts. Ignore the
-    // header-right slot (always inline in the header chrome).
+    // header-left/right slots (always inline in the header chrome).
     for (const s of SLOTS) {
-      if (s.id === 'header-right') continue;
+      if (s.id === 'header-right' || s.id === 'header-left') continue;
       const el = slotElFor(s.id);
       if (!el) continue;
       const hasContent = el.querySelector('[data-plugin-id]');
@@ -1214,7 +1217,7 @@ window.ttyview = (function() {
     const inner = document.createElement('span');
     inner.className = SLOT_INNER_CLASS[slotId] || 'hw-slot';
     inner.dataset.pluginId = def.id;
-    if (slotId === 'header-right') {
+    if (slotId === 'header-right' || slotId === 'header-left') {
       inner.style.cssText = 'display:inline-flex;align-items:center;';
     }
     slotEl.appendChild(inner);
