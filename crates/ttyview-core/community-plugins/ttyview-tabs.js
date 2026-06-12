@@ -108,8 +108,16 @@
         color: var(--ttv-fg);
         border: 1px solid var(--ttv-border);
         border-radius: 4px;
-        padding: 5px 10px;
+        /* Fixed height — glyph-independent. Emoji/symbol labels (📌, ▦)
+           get taller line boxes than Latin text on Android, which made
+           the measured row height (and therefore the whole section)
+           differ between pinned and all modes: 86px vs 92px, a 6px
+           jump on every toggle (caught via tabs-geom diag records). */
+        height: 28px;
+        box-sizing: border-box;
+        padding: 0 10px;
         font-size: 12px;
+        line-height: 1;
         font-family: inherit;
         white-space: nowrap;
         cursor: pointer;
