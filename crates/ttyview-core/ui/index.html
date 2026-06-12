@@ -1690,7 +1690,10 @@ function connectWs() {
         console.error('cell-diff handler threw', e);
       }
     } else if (msg.t === 'grid-reset') {
-      loadGrid(activePaneId);
+      // Refresh /panes BEFORE the grid: a reset is usually a resize,
+      // and the post-load autoFit reads cols from panesCache — stale
+      // cols would re-fit the font against the old width.
+      loadPanes().then(function() { return loadGrid(activePaneId); });
     } else if (msg.t === 'scrollback-append') {
       try { window.ttyview._internal.emit('scrollback-append', msg); } catch (e) {
         console.error('scrollback-append handler threw', e);
@@ -1908,6 +1911,23 @@ $refresh.addEventListener('click', async function() {
 let currentFontPx = parseFloat(localStorage.getItem('ttv-font-size')) || 12;
 let autoFitOn = localStorage.getItem('ttv-autofit') !== 'false'; // default on
 
+// Fit-resize: when autoFit would have to shrink the font below a
+// readability floor to fit the pane's columns on screen, narrow the
+// tmux WINDOW instead (WS {t:"resize"} — server pins window-size
+// manual, refcounted, restored on disconnect). This is the new-user
+// path: a pane created from a desktop terminal is 80–220 cols wide,
+// which maps to an unreadable font on a phone. Narrow-only — we never
+// widen a pane, so an already-phone-sized window is left alone.
+// Toggle lives in Settings → Display (`ttv-fit-resize`, default ON).
+const FIT_MIN_READABLE_PX = 11;  // below this, fitting font to pane is unreadable
+const FIT_TARGET_PX = 14;        // font the pane is resized to fit
+let instanceReadOnly = false;    // set from GET /api/instance at boot
+let lastFitReq = { pane: null, cols: 0, ts: 0 };  // resize-request loop guard
+
+function fitResizeOn() {
+  return localStorage.getItem('ttv-fit-resize') !== 'false'; // default on
+}
+
 // Pane width comes from panesCache (panel daemon is authoritative).
 // Was a tracked-from-buildGrid variable in Phase 1; now part of the
 // platform contract so the plugin doesn't need to push it back.
@@ -1922,17 +1942,20 @@ function applyFont(px) {
   localStorage.setItem('ttv-font-size', String(currentFontPx));
 }
 
-function measureCharWidth() {
-  // Build a hidden probe with the current font and measure its rendered width.
+function measureCharWidth(px) {
+  const fontPx = px || currentFontPx;
+  // Build a hidden probe with the requested font and measure its rendered width.
   const probe = document.createElement('span');
   probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:' +
     "'JetBrains Mono','Cascadia Code','Fira Code',Menlo,Consolas,monospace;font-size:" +
-    currentFontPx + 'px';
+    fontPx + 'px';
   probe.textContent = 'M'.repeat(40);
   document.body.appendChild(probe);
   const w = probe.getBoundingClientRect().width / 40;
   probe.remove();
-  return w;
+  // Pre-layout (or layout-less test DOM) the probe measures 0 — fall
+  // back to the canonical monospace aspect ratio instead of bailing.
+  return (w && w > 0) ? w : fontPx * 0.6;
 }
 
 function autoFit() {
@@ -1942,7 +1965,10 @@ function autoFit() {
   const padR = parseFloat(styles.paddingRight) || 0;
   // Account for vertical scrollbar width if present (~12-15 px on mobile).
   const sbWidth = $host.offsetWidth - $host.clientWidth;
-  const avail = $host.clientWidth - padL - padR - sbWidth;
+  // Pre-layout the host can read 0 wide — the viewport is the honest
+  // fallback (the grid host is full-width in every bundled layout).
+  const hostW = $host.clientWidth || window.innerWidth || 0;
+  const avail = hostW - padL - padR - sbWidth;
   const cols = getActivePaneCols();
   if (avail <= 0 || cols <= 0) return;
   const charW = measureCharWidth();
@@ -1953,7 +1979,41 @@ function autoFit() {
   const targetCharW = avail / cols;
   const ratio = targetCharW / charW;
   const target = Math.max(8, Math.min(28, Math.floor(currentFontPx * ratio)));
+  // Unreadable result → narrow the tmux window to fit a readable font
+  // instead of applying a microscopic one. Keep the font at the floor
+  // while the resized grid arrives (transient horizontal overflow).
+  if (target < FIT_MIN_READABLE_PX && requestPaneFit(avail)) {
+    if (currentFontPx < FIT_MIN_READABLE_PX) applyFont(FIT_MIN_READABLE_PX);
+    return;
+  }
   if (target !== currentFontPx) applyFont(target);
+}
+
+// Ask the daemon to narrow the active pane's window so FIT_TARGET_PX
+// fits `avail`. Returns true if a resize is requested or already
+// pending (caller should hold the font at the readability floor),
+// false when fit-resize can't or shouldn't act (caller falls back to
+// plain font-shrink autofit).
+function requestPaneFit(avail) {
+  if (!fitResizeOn()) return false;
+  if (instanceReadOnly) return false;
+  if (!activePaneId) return false;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const p = panesCache.find(x => x.id === activePaneId);
+  if (!p) return false;
+  const cols = Math.max(20, Math.floor(avail / measureCharWidth(FIT_TARGET_PX)));
+  // Narrow-only. If the pane is already at/below the target width the
+  // small font has another cause (tiny viewport) — not ours to fix.
+  if (cols >= (p.cols || 80)) return false;
+  const now = Date.now();
+  if (lastFitReq.pane === activePaneId && lastFitReq.cols === cols &&
+      now - lastFitReq.ts < 5000) {
+    return true; // identical request in flight — don't spam tmux
+  }
+  lastFitReq = { pane: activePaneId, cols: cols, ts: now };
+  ws.send(JSON.stringify({ t: 'resize', p: activePaneId, cols: cols, rows: p.rows || 24 }));
+  ttvDiag('fit-resize', { pane: activePaneId, from_cols: p.cols, to_cols: cols });
+  return true;
 }
 
 document.getElementById('font-down').addEventListener('click', function() {
@@ -3481,6 +3541,9 @@ function pickInitialPane(panes) {
     const r = await fetch('/api/instance');
     if (r.ok) {
       const info = await r.json();
+      // Fit-resize must not fire against read-only instances (the
+      // daemon would reject it anyway; don't even ask).
+      if (info && info.read_only) instanceReadOnly = true;
       if (info && info.demo) {
         document.body.classList.add('ttv-demo');
         if (!localStorage.getItem('ttv-demo-seeded')) {

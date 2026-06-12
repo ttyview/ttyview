@@ -497,6 +497,17 @@ impl PaneStore {
                         tracing::info!(
                             "reseed: pane={pane_id} new={rows}x{cols} cap_len={cap_len} cap_hash={cap_hash:08x} tail={tail_snippet:?}"
                         );
+                        // The grid the client renders has the OLD
+                        // dimensions — a resize is a reset, exactly like
+                        // an alt-screen flip. GridReset makes subscribers
+                        // refetch (and the bundled UI re-runs autoFit
+                        // against the new column count). The Tick alone
+                        // can't carry this: it has no dims and fires on
+                        // every output chunk.
+                        let _ = slot.tx.send(LiveEvent::GridReset {
+                            pane: pane_id.clone(),
+                            alt,
+                        });
                         let _ = slot.tx.send(LiveEvent::Tick {
                             pane: pane_id,
                             generation: gen,
@@ -506,9 +517,13 @@ impl PaneStore {
                             scrollback_len: sb_len,
                         });
                     } else {
-                        // Fallback: still emit a tick so subscribers
-                        // re-render their (now-empty) view.
+                        // Fallback: still emit a reset + tick so
+                        // subscribers re-render their (now-empty) view.
                         let s = slot.state.read().await;
+                        let _ = slot.tx.send(LiveEvent::GridReset {
+                            pane: pane.0.clone(),
+                            alt: s.term.screen.alt_active(),
+                        });
                         let _ = slot.tx.send(LiveEvent::Tick {
                             pane: pane.0.clone(),
                             generation: s.term.screen.generation,

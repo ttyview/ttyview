@@ -16,6 +16,11 @@
   // toggle is ON; the matching `body.<class> ...` rule lives in core
   // CSS (or another plugin's CSS). `defaultOn` gives the default
   // state when no setting exists yet (false = hidden by default).
+  //
+  // Entries with `lsKey` instead of `bodyClass` are behavioral flags
+  // that core reads from BARE localStorage (the ttv-autofit /
+  // ttv-font-size pattern) — the toggle writes 'true'/'false' there
+  // and pokes core via a window resize event, no CSS involved.
   const TOGGLES = [
     {
       key:       'showFontCtl',
@@ -31,15 +36,36 @@
       defaultOn: true,
       hint:      'Short tap on the row where the cursor sits (CC’s prompt area, ±1 row) focuses the bottom Message box. Long-press still selects text.',
     },
+    {
+      key:       'fitResize',
+      label:     'Auto-resize wide panes to fit this screen',
+      lsKey:     'ttv-fit-resize',
+      defaultOn: true,
+      hint:      'When a pane is too wide to read here (e.g. created from a desktop terminal), narrow its tmux window to fit a readable font. Narrow-only; the window is released when you disconnect.',
+    },
   ];
 
   function isOn(t) {
+    if (t.lsKey) {
+      const v = localStorage.getItem(t.lsKey);
+      return v === null ? t.defaultOn : v !== 'false';
+    }
     const v = STORAGE.get(t.key);
     return (v === true || v === false) ? v : t.defaultOn;
   }
+  function setOn(t, on) {
+    if (t.lsKey) {
+      localStorage.setItem(t.lsKey, on ? 'true' : 'false');
+      // Core re-reads the flag inside autoFit; a resize event is the
+      // cheapest way to trigger a re-fit pass right now.
+      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+      return;
+    }
+    STORAGE.set(t.key, on);
+  }
   function applyAll() {
     for (const t of TOGGLES) {
-      document.body.classList.toggle(t.bodyClass, isOn(t));
+      if (t.bodyClass) document.body.classList.toggle(t.bodyClass, isOn(t));
     }
   }
 
@@ -66,7 +92,7 @@
         cb.checked = isOn(t);
         cb.style.cssText = 'width:18px;height:18px;flex:none;';
         cb.addEventListener('change', function() {
-          STORAGE.set(t.key, cb.checked);
+          setOn(t, cb.checked);
           applyAll();
         });
         label.appendChild(cb);
