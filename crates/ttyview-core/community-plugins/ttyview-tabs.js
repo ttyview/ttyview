@@ -282,16 +282,20 @@
       }
     }
 
-    // Visible-height cap: keep the area `rows` rows tall and scroll
-    // vertically past that. Measured (not hardcoded) row height so
-    // font-size / padding changes don't desync the cap.
-    if (needsOwnRow && groups.length > rows) {
+    // Constant visible height: the area is ALWAYS exactly `rows` rows
+    // tall — fewer tabs leave empty space, more tabs scroll vertically.
+    // min-height == max-height so toggling pinned ↔ all (or pinning /
+    // unpinning) never shifts the layout around it. Measured (not
+    // hardcoded) row height so font-size / padding changes don't
+    // desync; the first row always has content (the mode toggle).
+    if (needsOwnRow) {
       requestAnimationFrame(function() {
         if (gen !== renderGen || !mountedSlot) return;
         const first = mountedSlot.firstElementChild;
         if (!first || !first.offsetHeight) return;
-        mountedSlot.style.maxHeight =
-          (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
+        const px = (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
+        mountedSlot.style.minHeight = px;
+        mountedSlot.style.maxHeight = px;
         mountedSlot.style.overflowY = 'auto';
         // Restore scroll only after the cap re-creates the overflow —
         // setting scrollTop on an uncapped element clamps it to 0.
