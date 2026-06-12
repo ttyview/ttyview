@@ -1920,7 +1920,10 @@ let autoFitOn = localStorage.getItem('ttv-autofit') !== 'false'; // default on
 // widen a pane, so an already-phone-sized window is left alone.
 // Toggle lives in Settings → Display (`ttv-fit-resize`, default ON).
 const FIT_MIN_READABLE_PX = 11;  // below this, fitting font to pane is unreadable
-const FIT_TARGET_PX = 14;        // font the pane is resized to fit
+// Resize the pane to fit exactly the readability floor — on a typical
+// phone that's ~60 cols, the density terminal users actually run at
+// (14px looked "too big": ~45 cols wastes half the line for CC output).
+const FIT_TARGET_PX = FIT_MIN_READABLE_PX;
 let instanceReadOnly = false;    // set from GET /api/instance at boot
 let lastFitReq = { pane: null, cols: 0, ts: 0 };  // resize-request loop guard
 

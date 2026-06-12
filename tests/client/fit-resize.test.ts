@@ -9,7 +9,7 @@
 // back to deterministic values): avail = window.innerWidth = 414,
 // charW fallback = fontPx * 0.6. Boot font 12px.
 //   wide pane (200 cols): target = floor(12 * (414/200) / 7.2) = 3 → <11
-//     → resize to cols = floor(414 / (14*0.6)) = 49.
+//     → resize to cols = floor(avail / (11*0.6)) ≈ 60.
 //   narrow pane (40 cols): target = floor(12 * (414/40) / 7.2) = 17 → ≥11
 //     → plain font autofit, NO resize (narrow-only invariant).
 import { describe, it, expect } from 'vitest';
@@ -39,11 +39,11 @@ describe('fit-resize (auto-narrow wide panes)', () => {
     expect(frames[0].t).toBe('resize');
     expect(frames[0].p).toBe('%1');
     expect(frames[0].rows).toBe(30);
-    // cols = floor(avail / (14px * 0.6)) where avail = innerWidth (414)
+    // cols = floor(avail / (11px * 0.6)) where avail = innerWidth (414)
     // minus host CSS padding — assert the phone-comfortable band rather
     // than a pixel-exact value so a padding tweak doesn't break this.
-    expect(frames[0].cols).toBeGreaterThanOrEqual(40);
-    expect(frames[0].cols).toBeLessThanOrEqual(50);
+    expect(frames[0].cols).toBeGreaterThanOrEqual(55);
+    expect(frames[0].cols).toBeLessThanOrEqual(65);
     // While the resized grid is in flight the font holds the
     // readability floor, not the microscopic fit.
     const fontPx = parseFloat(
