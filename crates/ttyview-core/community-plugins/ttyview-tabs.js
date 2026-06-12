@@ -173,7 +173,11 @@
   }
 
   // ---- core render of the tab area ----
-  let renderGen = 0;  // invalidates stale rAF callbacks across re-renders
+  let renderGen = 0;     // invalidates stale rAF callbacks across re-renders
+  let lastHeightPx = ''; // carried across renders so the area never
+                         // flashes to natural content height during the
+                         // cssText-reset → rAF-remeasure gap (visible as
+                         // a jump when toggling pinned ↔ all)
   function render() {
     if (!mountedSlot) return;
     const gen = ++renderGen;
@@ -235,6 +239,14 @@
       // applies to height and makes us claim the entire slot, which
       // visibly inflates row heights / inter-row gaps.
       mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
+      // Re-apply the last known height synchronously — the rAF below
+      // re-measures and refines, but without this the frame(s) in
+      // between render at content height and the section jumps.
+      if (lastHeightPx) {
+        mountedSlot.style.minHeight = lastHeightPx;
+        mountedSlot.style.maxHeight = lastHeightPx;
+        mountedSlot.style.overflowY = 'auto';
+      }
       // When the host slot is a row-flex container (the default for
       // above-input and above-grid), our column-of-tab-rows would
       // either get pushed off horizontally OR stretch the row's
@@ -294,6 +306,7 @@
         const first = mountedSlot.firstElementChild;
         if (!first || !first.offsetHeight) return;
         const px = (rows * first.offsetHeight + (rows - 1) * 4) + 'px';
+        lastHeightPx = px;
         mountedSlot.style.minHeight = px;
         mountedSlot.style.maxHeight = px;
         mountedSlot.style.overflowY = 'auto';
