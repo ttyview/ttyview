@@ -41,6 +41,28 @@
     return queues.get(paneId);
   }
 
+  // Self-contained preview thumbnail (data URL, ~128px). The obvious
+  // approach — an object URL of the picked File — breaks on Android:
+  // picker Files are content-provider-backed and the read grant can
+  // expire after a while, so the thumb renders as a broken image even
+  // though the upload long since succeeded. A data URL owns its bytes.
+  async function makeThumb(file) {
+    try {
+      const bmp = await createImageBitmap(file);
+      const long = Math.max(bmp.width, bmp.height);
+      const scale = Math.min(1, 128 / long);
+      const w = Math.max(1, Math.round(bmp.width * scale));
+      const h = Math.max(1, Math.round(bmp.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+      bmp.close();
+      return canvas.toDataURL('image/jpeg', 0.7);
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Phone photos are 3–8 MB / 12 MP raw; downscaling to a 2048px long
   // edge JPEG at q=0.85 lands around 200–500 KB without visible quality
   // loss. Skip GIFs (preserve animation) and anything already small.
@@ -136,6 +158,7 @@
       uid,
       file,
       blobUrl: URL.createObjectURL(file),
+      thumbUrl: null,    // data-URL preview; survives content-grant expiry
       name: file.name || 'image',
       status: 'preparing',
       progress: 0,
@@ -145,6 +168,12 @@
     };
     getQueue(paneId).push(entry);
     paint(paneId);
+    makeThumb(file).then(function(url) {
+      if (url && entry.status !== 'aborted') {
+        entry.thumbUrl = url;
+        paint(paneId);
+      }
+    });
     try {
       const downscaled = await maybeDownscale(file);
       if (entry.status === 'aborted') return;
@@ -311,7 +340,7 @@
       const thumb = document.createElement('div');
       thumb.className = 'ttv-img-thumb is-' + e.status;
       const img = document.createElement('img');
-      img.src = e.blobUrl;
+      img.src = e.thumbUrl || e.blobUrl;
       thumb.appendChild(img);
 
       const rm = document.createElement('button');
