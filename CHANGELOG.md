@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-06-18
+
+### Added
+
+- **SVG rail icons (`ttyview-tabs`)** — the utility rail's mode buttons
+  use inline SVG (a 2×2 grid for *all sessions*, a clock for *recent*)
+  instead of emoji glyphs, so they render identically across devices
+  and follow the theme. Colored via `currentColor`, or
+  `--ttv-rail-accent` when an embedder sets one; inactive icons dim,
+  the lit (active-mode) button goes full-opacity with an accent border.
+
+### Fixed
+
+- **Tab area no longer changes height between modes (`ttyview-tabs`).**
+  The always-on recent row renders in pinned mode only, but the prior
+  constant-height fix capped only the scrolling content — so the recent
+  row's height sat outside the cap and made pinned mode ~38 px taller
+  than *all* / *recent*. Switching modes shifted the whole tab stack and
+  bumped the terminal above. The whole tab column is now pinned to one
+  mode-independent height (the recent row's height is reserved in the
+  modes where it's absent; content flexes + scrolls to fill).
+
 ## [0.1.4] — 2026-06-12
 
 ### Added
@@ -204,7 +226,8 @@ view, Claude Code chat view, Solarized Dark / Terminal Green / Nord
 themes), sandbox broker (Tier 3 demo), Cloud Run image, GCE VM
 deploy scripts.
 
-[Unreleased]: https://github.com/ttyview/ttyview/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/ttyview/ttyview/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/ttyview/ttyview/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/ttyview/ttyview/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/ttyview/ttyview/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ttyview/ttyview/compare/v0.1.1...v0.1.2
