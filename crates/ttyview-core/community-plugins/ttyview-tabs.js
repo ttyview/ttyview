@@ -300,8 +300,9 @@
         accH: ar ? Math.round(ar.height * 10) / 10 : -1,
         accTop: ar ? Math.round(ar.top * 10) / 10 : -1,
         inputTop: inp ? Math.round(inp.getBoundingClientRect().top * 10) / 10 : -1,
-        min: contentEl ? contentEl.style.minHeight : '',
-        max: contentEl ? contentEl.style.maxHeight : '',
+        // The pinned stack height now lives on leftCol (content's parent);
+        // it's the constant that must NOT vary across modes.
+        stackH: (contentEl && contentEl.parentNode) ? contentEl.parentNode.style.height : '',
         kids: contentEl ? contentEl.children.length : 0,
       });
     } catch (_) {}
@@ -440,7 +441,12 @@
       /* ---- project groups ---- */
       .ttvtab-content {
         display: flex; flex-direction: column; gap: 4px;
-        flex: 1 1 auto; min-width: 0;
+        /* flex:1 1 0 + min-height:0 so it fills the height leftCol
+           leaves after the (pinned-mode-only) recent row and scrolls,
+           instead of dictating its own height. leftCol is pinned to a
+           constant total — keeps mode switches from bumping the
+           terminal. */
+        flex: 1 1 0; min-width: 0; min-height: 0;
         overflow-y: auto;
         scrollbar-width: none;
       }
@@ -546,9 +552,16 @@
 
   // ---- core render of the tab area ----
   let renderGen = 0;     // invalidates stale rAF callbacks across re-renders
-  let lastHeightPx = ''; // carried across renders so the area never
+  let lastHeightPx = ''; // the constant tab-stack (leftCol) height,
+                         // carried across renders so a mode switch never
                          // flashes to natural content height during the
-                         // re-render → rAF-remeasure gap
+                         // re-render → rAF-remeasure gap. Mode-INDEPENDENT
+                         // (see the render-settle rAF) so ▦/🕘 don't bump
+                         // the terminal above.
+  let recentReserve = 0; // measured height (incl. the leftCol gap) of the
+                         // always-on recent row; cached from renders where
+                         // it's present so the modes where it's absent
+                         // (all / recent) can reserve the same space.
   function render() {
     if (!mountedSlot) return;
     const gen = ++renderGen;
@@ -564,6 +577,12 @@
     const rows = Math.max(1, settings.rows | 0);
     const max  = Math.max(0, settings.maxPerRow | 0);
     const fitMode = max > 0;
+    // Whether the always-on recent row is in play at all (enabled AND
+    // there's something recent to show). Computed mode-independently:
+    // the row only RENDERS in pinned mode, but its height is reserved in
+    // every mode so switching modes can't change the stack height.
+    const recentsActive = settings.recentRow !== false
+      && liveRecents(panes, true).length > 0;
 
     // Layout: [ leftCol (recent row + groups) | rail ]. mountedSlot is
     // a row; the left column stacks the optional recent row above the
@@ -583,6 +602,12 @@
 
     const leftCol = document.createElement('div');
     leftCol.style.cssText = 'display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;';
+    // Re-apply the last known stack height synchronously — the rAF at
+    // the end of render() re-measures and refines, but without this the
+    // frame(s) in between render at natural content height and the area
+    // jumps. lastHeightPx is mode-independent, so this is correct even
+    // across a mode switch (the whole point: no terminal bump).
+    if (lastHeightPx) leftCol.style.height = lastHeightPx;
     mountedSlot.appendChild(leftCol);
 
     // A — always-on recent row: most-recently-used sessions, across
@@ -597,13 +622,11 @@
 
     const content = document.createElement('div');
     content.className = 'ttvtab-content';
-    // Re-apply the last known height synchronously — the rAF below
-    // re-measures and refines, but without this the frame(s) in
-    // between render at content height and the section jumps.
-    if (lastHeightPx) {
-      content.style.minHeight = lastHeightPx;
-      content.style.maxHeight = lastHeightPx;
-    }
+    // Height is governed by leftCol (fixed) + this element's flex:1 1 0
+    // / min-height:0 / overflow-y:auto (see CSS): it fills whatever
+    // leftCol leaves after the recent row and scrolls. No explicit cap
+    // here — that lived on content before groups + the recent row made
+    // the stack height mode-dependent.
     leftCol.appendChild(content);
     contentEl = content;
 
@@ -825,21 +848,29 @@
     makeRail(rail, mode);
     mountedSlot.appendChild(rail);
 
-    // Constant visible height: the content column is ALWAYS exactly
-    // `rows` tab-rows tall — fewer tabs leave empty space, more tabs
-    // (or expanded groups) scroll vertically. min == max so collapse /
-    // expand / mode toggles never shift the layout around the area.
-    // Measured (not hardcoded) tab height so font-size / padding
-    // changes don't desync.
+    // Constant stack height: the whole left column (the always-on
+    // recent row + the scrolling content) is pinned to ONE height in
+    // every mode, so switching pinned / ▦ all / 🕘 recent never changes
+    // the tab area's size and bumps the terminal above. The content is
+    // ALWAYS exactly `rows` tab-rows tall; the recent row is pinned-mode
+    // only, so its measured height is RESERVED in the other modes (the
+    // content grows to fill that space rather than leaving a gap).
+    // Everything is measured (not hardcoded) so font-size / padding
+    // changes don't desync — and the recent row's own height is cached
+    // (recentReserve) from the renders where it's present, for use in
+    // the modes where it's absent.
     requestAnimationFrame(function() {
       if (gen !== renderGen || !mountedSlot) return;
       const tab = mountedSlot.querySelector('.ttvtab');
       const h = (tab && tab.offsetHeight) ? tab.offsetHeight : 28;
-      const px = (rows * h + (rows - 1) * 4) + 'px';
+      const contentBase = rows * h + (rows - 1) * 4;
+      const rr = leftCol.querySelector('.ttvtab-recentrow');
+      if (rr) recentReserve = rr.offsetHeight + 4 /* leftCol row gap */;
+      const reserve = recentsActive ? (recentReserve || (h + 10)) : 0;
+      const px = (contentBase + reserve) + 'px';
       lastHeightPx = px;
-      content.style.minHeight = px;
-      content.style.maxHeight = px;
-      // Restore scroll only after the cap re-creates the overflow —
+      leftCol.style.height = px;
+      // Restore scroll only after the height re-creates the overflow —
       // setting scrollTop on an uncapped element clamps it to 0.
       if (prevScroll) content.scrollTop = prevScroll;
       logGeom('render-settle');
