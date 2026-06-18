@@ -15,9 +15,16 @@
 // per group.
 //
 // A vertical utility rail sits on the RIGHT edge of the area (thumb
-// side): ▦ toggles the all-sessions view (every tmux session,
-// alphabetical; tap to switch, long-press to pin/unpin). The rail
-// replaced the leading 📌/▦ cell that used to occupy a tab slot.
+// side) with two mode buttons: ▦ = all sessions (every tmux session,
+// alphabetical), 🕘 = recent (MRU, most-recent first). Tap to switch
+// into the mode; tap the lit one to return to pinned. In both modes,
+// tap a tab to switch, long-press to pin/unpin.
+//
+// Above the groups, an always-on RECENT ROW (toggle in Settings)
+// shows the most-recently-used sessions across all groups, newest
+// first — one tap to jump back to where you just were. Recency is
+// fed by the 'pane-changed' event and persisted (server-synced, so
+// it carries across devices).
 //
 // Status dots (tmux-web-style, per session, settings-toggleable):
 // amber pulsing = Claude Code permission prompt open (semantic
@@ -50,7 +57,10 @@
   const SETTINGS_KEY = 'settings';
   const GROUPS_KEY = 'groups';
   const LONG_PRESS_MS = 500;
-  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true };  // maxPerRow 0 = unlimited per row
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true };  // maxPerRow 0 = unlimited per row
+  const RECENTS_KEY = 'recents';
+  const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row
+  const RECENT_STORE_MAX = 30;  // MRU entries kept in storage
   const DOT_ACTIVE_MS = 4000;  // pane output within this window = "active"
   const DOT_POLL_MS = 4000;    // /panes refresh cadence while mounted + visible
 
@@ -82,6 +92,49 @@
   function savePins()      { storage.set(STORAGE_KEY,  pins);      }
   function saveSettings()  { storage.set(SETTINGS_KEY, settings);  }
   function saveGroups()    { storage.set(GROUPS_KEY,   groupsCfg); }
+
+  // ---- recents (MRU across all sessions) ----
+  // A plain most-recently-used list of SESSION NAMES, newest first.
+  // Fed by the 'pane-changed' event (below); powers both the always-on
+  // recent row (A) and the 🕘 rail mode (B). Server-synced storage, so
+  // recency carries across the user's devices.
+  let recents = (function() {
+    const v = storage.get(RECENTS_KEY);
+    return Array.isArray(v) ? v.filter(s => typeof s === 'string') : [];
+  })();
+  function saveRecents() { storage.set(RECENTS_KEY, recents.slice(0, RECENT_STORE_MAX)); }
+  // Move `session` to the front. Returns true if order actually changed
+  // (so callers can skip a redundant re-render).
+  function noteRecent(session) {
+    if (!session) return false;
+    const i = recents.indexOf(session);
+    if (i === 0) return false;
+    if (i > 0) recents.splice(i, 1);
+    recents.unshift(session);
+    if (recents.length > RECENT_STORE_MAX) recents.length = RECENT_STORE_MAX;
+    saveRecents();
+    return true;
+  }
+  // MRU-ordered LIVE sessions, one representative pane each. With
+  // `recentsOnly` (the always-on row): ONLY sessions you've actually
+  // visited, in recency order — short and genuinely recent, no filler.
+  // Without it (the 🕘 mode): recents first, then every never-visited
+  // live session (alphabetical), so the mode is a full switcher.
+  function liveRecents(panes, recentsOnly) {
+    const bySession = new Map();
+    for (const p of panes) if (!bySession.has(p.session)) bySession.set(p.session, p);
+    const out = [];
+    const used = new Set();
+    for (const s of recents) {
+      const p = bySession.get(s);
+      if (p && !used.has(s)) { out.push(p); used.add(s); }
+    }
+    if (recentsOnly) return out;
+    const rest = [];
+    for (const p of panes) if (!used.has(p.session)) { used.add(p.session); rest.push(p); }
+    rest.sort((a, b) => String(a.session).localeCompare(String(b.session)));
+    return out.concat(rest);
+  }
 
   // Muted dark-theme palette — pure hues vibrate on dark backgrounds.
   // Deterministic name→color so groups keep their color across
@@ -197,6 +250,14 @@
     const p = tv.listPanes().find(x => x.id === e.to);
     if (p) attention.delete(p.session);
   });
+  // MRU bookkeeping. Module-scope (like the dot handlers) so it runs
+  // BEFORE the tabBar contribution's own pane-changed→render handler —
+  // the recent row is fresh by the time render() reads `recents`.
+  tv.on('pane-changed', function(e) {
+    if (!e || !e.to) return;
+    const p = tv.listPanes().find(x => x.id === e.to);
+    if (p) noteRecent(p.session);
+  });
   tv.on('semantic', function(ev) {
     if (!dotsOn() || !ev || !ev.name) return;
     if (ev.name === 'claude.permission_prompt') {
@@ -233,7 +294,7 @@
       const inp = document.getElementById('input-row');
       window.ttvDiag('tabs-geom', {
         tag: tag,
-        mode: settings.mode === 'all' ? 'all' : 'pinned',
+        mode: settings.mode || 'pinned',
         slotH: Math.round(r.height * 10) / 10,
         slotTop: Math.round(r.top * 10) / 10,
         accH: ar ? Math.round(ar.height * 10) / 10 : -1,
@@ -462,6 +523,23 @@
       .ttvtab-rail .ttvtab {
         width: 32px; padding: 0; justify-content: center;
       }
+      /* ---- recent row (A) ---- */
+      .ttvtab-recentrow {
+        display: flex; gap: 4px; align-items: center;
+        flex: none;
+        overflow-x: auto; scrollbar-width: none;
+        /* A tray, visually distinct from the groups: darker, with a
+           hairline separating it from the area below. */
+        background: var(--ttv-bg-elev);
+        border-bottom: 1px solid var(--ttv-border);
+        padding: 0 0 5px;
+      }
+      .ttvtab-recentrow::-webkit-scrollbar { display: none; }
+      .ttvtab-recent-glyph {
+        flex: none; font-size: 11px; opacity: 0.5;
+        padding: 0 4px 0 2px; line-height: 1; align-self: center;
+        cursor: default;
+      }
     `;
     document.head.appendChild(st);
   }
@@ -481,7 +559,8 @@
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
     const active = tv.getActivePane();
-    const mode = settings.mode === 'all' ? 'all' : 'pinned';
+    const mode = (settings.mode === 'all' || settings.mode === 'recent')
+      ? settings.mode : 'pinned';
     const rows = Math.max(1, settings.rows | 0);
     const max  = Math.max(0, settings.maxPerRow | 0);
     const fitMode = max > 0;
@@ -490,12 +569,28 @@
     // The parent slot is row-flex by default — claim it as a column
     // context (see .ttv-stacked-slot) so width:100% works and the
     // quickkeys sibling keeps its own horizontal scroll.
-    mountedSlot.style.cssText = 'display:flex;flex-direction:row;gap:4px;width:100%;align-items:stretch;';
+    // mountedSlot is a COLUMN: optional recent row on top, then the
+    // [content | rail] area row. (It was a plain row before the recent
+    // row landed — the rail now spans only the groups area, sitting
+    // beside the groups, not beside the recent row.)
+    mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
     const parent = mountedSlot.parentNode;
     if (parent) {
       parent.classList.add('ttv-stacked-slot');
       parentTouched = true;
     }
+
+    // A — always-on recent row: most-recently-used sessions, across
+    // groups, one tap to jump back. Pinned mode only (the 🕘 rail mode
+    // is the full recent view); opt out via Settings → Recent tabs.
+    if (mode === 'pinned' && settings.recentRow !== false) {
+      const rr = buildRecentRow(panes, active);
+      if (rr) mountedSlot.appendChild(rr);
+    }
+
+    const areaRow = document.createElement('div');
+    areaRow.style.cssText = 'display:flex;flex-direction:row;gap:4px;align-items:stretch;min-width:0;';
+    mountedSlot.appendChild(areaRow);
 
     const content = document.createElement('div');
     content.className = 'ttvtab-content';
@@ -506,7 +601,7 @@
       content.style.minHeight = lastHeightPx;
       content.style.maxHeight = lastHeightPx;
     }
-    mountedSlot.appendChild(content);
+    areaRow.appendChild(content);
     contentEl = content;
 
     const placedTabs = []; // { el, label, fullText } — for ellipsis pass
@@ -692,6 +787,12 @@
         }
         content.appendChild(g);
       }
+    } else if (mode === 'recent') {
+      // B — flat MRU list, most-recent first (live sessions). Same
+      // tap-to-switch / long-press-to-pin behavior as all-sessions.
+      placeRows(content, liveRecents(panes), function(p) {
+        return makeSessionButton(p, active, fitMode);
+      });
     } else {
       // Every session, one tab each, alphabetical.
       const seen = new Set();
@@ -710,8 +811,8 @@
     // belong in an overlay, not a scrolling rail.
     const rail = document.createElement('div');
     rail.className = 'ttvtab-rail';
-    rail.appendChild(makeRailToggle(mode));
-    mountedSlot.appendChild(rail);
+    makeRail(rail, mode);
+    areaRow.appendChild(rail);
 
     // Constant visible height: the content column is ALWAYS exactly
     // `rows` tab-rows tall — fewer tabs leave empty space, more tabs
@@ -813,26 +914,32 @@
     return { el: add, label, fullText };
   }
 
-  // Rail ▦ — shows/hides the all-sessions view. Lit (active) while in
-  // all mode so the rail doubles as a mode indicator.
-  function makeRailToggle(mode) {
+  // Utility rail — mode buttons on the thumb-side edge. Each button
+  // selects its mode (▦ all, 🕘 recent) and lights up while active;
+  // tapping the lit one returns to pinned. The rail thus doubles as
+  // the mode indicator. Pinned is "home" (both unlit).
+  function makeRail(railEl, mode) {
+    railEl.appendChild(makeRailButton('▦', 'all', mode,
+      mode === 'all' ? 'Back to pinned tabs' : 'Show all sessions'));
+    railEl.appendChild(makeRailButton('🕘', 'recent', mode,
+      mode === 'recent' ? 'Back to pinned tabs' : 'Show recent sessions (most recent first)'));
+  }
+  function makeRailButton(glyph, targetMode, mode, title) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ttvtab';
-    if (mode === 'all') btn.classList.add('active');
+    if (mode === targetMode) btn.classList.add('active');
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
-    label.textContent = '▦';
+    label.textContent = glyph;
     btn.appendChild(label);
-    btn.title = mode === 'pinned'
-      ? 'Show all sessions'
-      : 'Back to pinned tabs';
-    btn.setAttribute('aria-label', btn.title);
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
     btn.tabIndex = -1;
     btn.addEventListener('pointerup', function(e) {
       if (e.button !== undefined && e.button !== 0) return;
       logGeom('pre-toggle');
-      settings.mode = mode === 'pinned' ? 'all' : 'pinned';
+      settings.mode = (mode === targetMode) ? 'pinned' : targetMode;
       saveSettings();
       render();
       // Per-frame burst: catches transients the after-the-settle
@@ -847,8 +954,32 @@
     return btn;
   }
 
-  // All-sessions mode tab. Tap switches; long-press toggles the pin.
-  function makeSessionButton(pane, active, fitMode) {
+  // The always-on recent row (A): a horizontally-scrollable strip of
+  // the most-recently-used live sessions, newest first, with a leading
+  // 🕘 marker. Returns null when there's nothing to show. Full session
+  // names (not group-stripped) since recents cross groups; the pin
+  // mark is suppressed (most recents are pinned — it'd be noise).
+  function buildRecentRow(panes, active) {
+    const live = liveRecents(panes, true).slice(0, RECENT_ROW_MAX);
+    if (!live.length) return null;
+    const row = document.createElement('div');
+    row.className = 'ttvtab-recentrow';
+    const glyph = document.createElement('span');
+    glyph.className = 'ttvtab-recent-glyph';
+    glyph.textContent = '🕘';
+    glyph.title = 'Recently used sessions';
+    row.appendChild(glyph);
+    for (const p of live) {
+      const made = makeSessionButton(p, active, false, { noPinMark: true });
+      row.appendChild(made.el);
+    }
+    return row;
+  }
+
+  // All-sessions / recent-mode / recent-row tab. Tap switches;
+  // long-press toggles the pin. opts.noPinMark suppresses the 📌
+  // indicator (used in the recent row, where it's just noise).
+  function makeSessionButton(pane, active, fitMode, opts) {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'ttvtab';
@@ -860,7 +991,7 @@
     label.textContent = fullText;
     btn.appendChild(label);
     const isPinned = !!pins.find(p => p.session === pane.session);
-    if (isPinned) {
+    if (isPinned && !(opts && opts.noPinMark)) {
       const mark = document.createElement('span');
       mark.className = 'ttvtab-pinmark';
       mark.textContent = '📌';
@@ -985,6 +1116,11 @@
       dotPollTimer = setInterval(pollDots, DOT_POLL_MS);
       document.addEventListener('visibilitychange', onVisibilityPoll);
 
+      // Seed the MRU with the session you're currently in, so the
+      // recent row isn't empty before your first pane switch.
+      const seed = tv.getActivePane();
+      if (seed) noteRecent(seed.session);
+
       render();
       return function unmount() {
         off1(); off2();
@@ -1085,6 +1221,23 @@
       });
       rG.appendChild(expandAll);
       container.appendChild(rG);
+
+      // Recent tabs row (A) + the 🕘 rail mode (B)
+      const rR = makeRow('Recent tabs', 'A strip of your most recently used sessions (newest first) sits above the groups — one tap to jump back, across projects. The 🕘 button on the rail opens a full recent-only view. Recency is tracked across your devices.');
+      const recLbl = document.createElement('label');
+      recLbl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);cursor:pointer;';
+      const recChk = document.createElement('input');
+      recChk.type = 'checkbox';
+      recChk.checked = settings.recentRow !== false;
+      recChk.addEventListener('change', function() {
+        settings.recentRow = recChk.checked;
+        saveSettings();
+        render();
+      });
+      recLbl.appendChild(recChk);
+      recLbl.appendChild(document.createTextNode('Show recent tabs row'));
+      rR.appendChild(recLbl);
+      container.appendChild(rR);
 
       // Rows
       const r2 = makeRow('Number of rows', 'Visible height of the tab area, in tab-rows (needs Max tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
