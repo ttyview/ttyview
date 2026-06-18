@@ -532,14 +532,14 @@
            hairline separating it from the area below. */
         background: var(--ttv-bg-elev);
         border-bottom: 1px solid var(--ttv-border);
-        padding: 0 0 5px;
+        /* Match a group's left inset (3px bracket + 6px) EXACTLY so
+           recent tabs share the groups' fit-width grid AND align to
+           the same left column. A muted bracket marks the recent band
+           (vs the per-project colored group brackets). */
+        border-left: 3px solid var(--ttv-muted);
+        padding: 0 0 5px 6px;
       }
       .ttvtab-recentrow::-webkit-scrollbar { display: none; }
-      .ttvtab-recent-glyph {
-        flex: none; font-size: 11px; opacity: 0.5;
-        padding: 0 4px 0 2px; line-height: 1; align-self: center;
-        cursor: default;
-      }
     `;
     document.head.appendChild(st);
   }
@@ -565,32 +565,35 @@
     const max  = Math.max(0, settings.maxPerRow | 0);
     const fitMode = max > 0;
 
-    // Layout: [ content column (groups / rows, scrolls vertically) | rail ].
+    // Layout: [ leftCol (recent row + groups) | rail ]. mountedSlot is
+    // a row; the left column stacks the optional recent row above the
+    // groups content. Keeping the recent row INSIDE the left column
+    // (not full-width above everything) makes its width equal the
+    // groups' width, so recent tabs and group tabs share the same
+    // fit-width grid. The rail spans the full height on the thumb side.
     // The parent slot is row-flex by default — claim it as a column
     // context (see .ttv-stacked-slot) so width:100% works and the
     // quickkeys sibling keeps its own horizontal scroll.
-    // mountedSlot is a COLUMN: optional recent row on top, then the
-    // [content | rail] area row. (It was a plain row before the recent
-    // row landed — the rail now spans only the groups area, sitting
-    // beside the groups, not beside the recent row.)
-    mountedSlot.style.cssText = 'display:flex;flex-direction:column;gap:4px;width:100%;';
+    mountedSlot.style.cssText = 'display:flex;flex-direction:row;gap:4px;width:100%;align-items:stretch;';
     const parent = mountedSlot.parentNode;
     if (parent) {
       parent.classList.add('ttv-stacked-slot');
       parentTouched = true;
     }
 
+    const leftCol = document.createElement('div');
+    leftCol.style.cssText = 'display:flex;flex-direction:column;gap:4px;flex:1 1 auto;min-width:0;';
+    mountedSlot.appendChild(leftCol);
+
     // A — always-on recent row: most-recently-used sessions, across
     // groups, one tap to jump back. Pinned mode only (the 🕘 rail mode
     // is the full recent view); opt out via Settings → Recent tabs.
+    // Built after placedTabs is declared (below) so its fit tabs join
+    // the same middle-ellipsis pass; deferred via a thunk here.
+    let buildRecentInto = null;
     if (mode === 'pinned' && settings.recentRow !== false) {
-      const rr = buildRecentRow(panes, active);
-      if (rr) mountedSlot.appendChild(rr);
+      buildRecentInto = leftCol;
     }
-
-    const areaRow = document.createElement('div');
-    areaRow.style.cssText = 'display:flex;flex-direction:row;gap:4px;align-items:stretch;min-width:0;';
-    mountedSlot.appendChild(areaRow);
 
     const content = document.createElement('div');
     content.className = 'ttvtab-content';
@@ -601,10 +604,18 @@
       content.style.minHeight = lastHeightPx;
       content.style.maxHeight = lastHeightPx;
     }
-    areaRow.appendChild(content);
+    leftCol.appendChild(content);
     contentEl = content;
 
     const placedTabs = []; // { el, label, fullText } — for ellipsis pass
+
+    // Now that placedTabs exists, build the recent row (prepended above
+    // the groups in the left column) and feed its fit tabs into the
+    // same ellipsis pass.
+    if (buildRecentInto) {
+      const rr = buildRecentRow(panes, active, fitMode, max, placedTabs);
+      if (rr) buildRecentInto.insertBefore(rr, content);
+    }
 
     // Chunk `entries` into .ttvtab-row children of parentEl —
     // maxPerRow per row in fit mode, one scrolling row otherwise.
@@ -812,7 +823,7 @@
     const rail = document.createElement('div');
     rail.className = 'ttvtab-rail';
     makeRail(rail, mode);
-    areaRow.appendChild(rail);
+    mountedSlot.appendChild(rail);
 
     // Constant visible height: the content column is ALWAYS exactly
     // `rows` tab-rows tall — fewer tabs leave empty space, more tabs
@@ -959,19 +970,22 @@
   // 🕘 marker. Returns null when there's nothing to show. Full session
   // names (not group-stripped) since recents cross groups; the pin
   // mark is suppressed (most recents are pinned — it'd be noise).
-  function buildRecentRow(panes, active) {
+  // fitMode/max mirror the groups so recent tabs share the SAME
+  // fit-width grid; placedTabs (optional) collects fit tabs for the
+  // caller's middle-ellipsis pass. The row keeps a single horizontal
+  // scroll (more recents than fit just scroll), so tab WIDTH matches a
+  // group tab while still showing the full MRU list.
+  function buildRecentRow(panes, active, fitMode, max, placedTabs) {
     const live = liveRecents(panes, true).slice(0, RECENT_ROW_MAX);
     if (!live.length) return null;
     const row = document.createElement('div');
     row.className = 'ttvtab-recentrow';
-    const glyph = document.createElement('span');
-    glyph.className = 'ttvtab-recent-glyph';
-    glyph.textContent = '🕘';
-    glyph.title = 'Recently used sessions';
-    row.appendChild(glyph);
+    row.title = 'Recently used sessions';
+    if (fitMode) row.style.setProperty('--ttv-max-per-row', String(max));
     for (const p of live) {
-      const made = makeSessionButton(p, active, false, { noPinMark: true });
+      const made = makeSessionButton(p, active, fitMode, { noPinMark: true });
       row.appendChild(made.el);
+      if (fitMode && placedTabs && made.label) placedTabs.push(made);
     }
     return row;
   }
