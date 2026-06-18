@@ -528,7 +528,21 @@
       }
       .ttvtab-rail .ttvtab {
         width: 32px; padding: 0; justify-content: center;
+        /* Icon color = the embedder's rail accent if set (mobile-cc
+           paints it brand-coral), else the host theme accent. */
+        color: var(--ttv-rail-accent, var(--ttv-accent));
       }
+      .ttvtab-rail .ttvtab .ttvtab-label { overflow: visible; display: inline-flex; }
+      .ttvtab-rail .ttvtab svg { display: block; opacity: 0.5; transition: opacity 120ms; }
+      .ttvtab-rail .ttvtab:active svg { opacity: 0.8; }
+      /* Lit = the active mode. Override the generic .active (which uses
+         --ttv-accent) so the rail follows its own accent. */
+      .ttvtab-rail .ttvtab.active {
+        background: var(--ttv-bg);
+        border-color: var(--ttv-rail-accent, var(--ttv-accent));
+        color: var(--ttv-rail-accent, var(--ttv-accent));
+      }
+      .ttvtab-rail .ttvtab.active svg { opacity: 1; }
       /* ---- recent row (A) ---- */
       .ttvtab-recentrow {
         display: flex; gap: 4px; align-items: center;
@@ -956,24 +970,38 @@
     return { el: add, label, fullText };
   }
 
+  // Rail icons — inline SVG, not emoji: identical on every device and
+  // themeable via currentColor (the host accent, or --ttv-rail-accent if
+  // an embedder sets one). Round caps/joins keep them friendly.
+  //   all    — a 2×2 grid of sessions
+  //   recent — a clock (MRU / most-recent-first)
+  const RAIL_ICONS = {
+    all: '<svg viewBox="0 0 18 18" width="18" height="18" fill="currentColor" aria-hidden="true">'
+      + '<rect x="2" y="2" width="6" height="6" rx="1.6"/><rect x="10" y="2" width="6" height="6" rx="1.6"/>'
+      + '<rect x="2" y="10" width="6" height="6" rx="1.6"/><rect x="10" y="10" width="6" height="6" rx="1.6"/></svg>',
+    recent: '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<circle cx="9" cy="9" r="6.5"/><path d="M9 5.2V9l2.6 1.7"/></svg>',
+  };
+
   // Utility rail — mode buttons on the thumb-side edge. Each button
-  // selects its mode (▦ all, 🕘 recent) and lights up while active;
-  // tapping the lit one returns to pinned. The rail thus doubles as
-  // the mode indicator. Pinned is "home" (both unlit).
+  // selects its mode (all / recent) and lights up while active; tapping
+  // the lit one returns to pinned. The rail thus doubles as the mode
+  // indicator. Pinned is "home" (both unlit).
   function makeRail(railEl, mode) {
-    railEl.appendChild(makeRailButton('▦', 'all', mode,
+    railEl.appendChild(makeRailButton('all', 'all', mode,
       mode === 'all' ? 'Back to pinned tabs' : 'Show all sessions'));
-    railEl.appendChild(makeRailButton('🕘', 'recent', mode,
+    railEl.appendChild(makeRailButton('recent', 'recent', mode,
       mode === 'recent' ? 'Back to pinned tabs' : 'Show recent sessions (most recent first)'));
   }
-  function makeRailButton(glyph, targetMode, mode, title) {
+  function makeRailButton(icon, targetMode, mode, title) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'ttvtab';
+    btn.className = 'ttvtab ttvtab-railbtn';
     if (mode === targetMode) btn.classList.add('active');
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
-    label.textContent = glyph;
+    label.innerHTML = RAIL_ICONS[icon] || '';
     btn.appendChild(label);
     btn.title = title;
     btn.setAttribute('aria-label', title);
