@@ -2000,6 +2000,39 @@ const FIT_TARGET_PX = FIT_MIN_READABLE_PX;
 const FIT_WIDEN_TRIGGER_PX = 18; // best-fit font this big ⇒ pane too narrow for the viewport
 const FIT_PREFERRED_PX = 14;     // comfortable density to widen toward
 const FIT_MAX_COLS = 220;        // never widen the window past this
+// Comfortable reading width on wide viewports. Rather than fill a desktop
+// window edge-to-edge (long lines hurt readability, and CC's TUI is designed
+// around ~80–130 cols), the widen path grows toward this cap, then the grid
+// is CENTERED with even margins — a readable column, like an editor. The base
+// horizontal padding of #grid-host (matches the `padding: 4px 6px` rule).
+const FIT_DEFAULT_MAX_COLS = 120; // default comfortable cap; 0 (via setting) = fill width
+const GRID_BASE_HPAD = 6;
+// User override for the comfortable cap. `ttv-max-cols`: a column count, or 0
+// to fill the width (no centering). Absent → the default cap.
+function maxContentCols() {
+  try {
+    const v = parseInt(localStorage.getItem('ttv-max-cols'), 10);
+    if (!isNaN(v) && v >= 0) return v;
+  } catch (e) {}
+  return FIT_DEFAULT_MAX_COLS;
+}
+// Center the cell grid by padding #grid-host symmetrically when the pane
+// (cols × charW) is narrower than the available width. autoFit measures
+// `avail` from GRID_BASE_HPAD (a fixed base), NOT the live padding, so the
+// centering padding we set here can't feed back into the next measurement.
+function centerGrid(fullAvail, cols, fontPx) {
+  if (!$host) return;
+  const paneW = cols * measureCharWidth(fontPx);
+  const extra = fullAvail - paneW;
+  if (extra > 24) {
+    const side = Math.floor(extra / 2) + GRID_BASE_HPAD;
+    $host.style.paddingLeft = side + 'px';
+    $host.style.paddingRight = side + 'px';
+  } else {
+    $host.style.paddingLeft = '';
+    $host.style.paddingRight = '';
+  }
+}
 let instanceReadOnly = false;    // set from GET /api/instance at boot
 let lastFitReq = { pane: null, cols: 0, ts: 0 };  // resize-request loop guard
 
@@ -2047,15 +2080,15 @@ function measureCharWidth(px) {
 
 function autoFit() {
   if (!autoFitOn) return;
-  const styles = getComputedStyle($host);
-  const padL = parseFloat(styles.paddingLeft) || 0;
-  const padR = parseFloat(styles.paddingRight) || 0;
   // Account for vertical scrollbar width if present (~12-15 px on mobile).
   const sbWidth = $host.offsetWidth - $host.clientWidth;
   // Pre-layout the host can read 0 wide — the viewport is the honest
   // fallback (the grid host is full-width in every bundled layout).
   const hostW = $host.clientWidth || window.innerWidth || 0;
-  const avail = hostW - padL - padR - sbWidth;
+  // Measure against the FIXED base padding, not the live padding — the
+  // centering step below sets large symmetric padding, and reading it back
+  // here would shrink `avail` and feed back into the column math.
+  const avail = hostW - 2 * GRID_BASE_HPAD - sbWidth;
   const cols = getActivePaneCols();
   if (avail <= 0 || cols <= 0) return;
   const charW = measureCharWidth();
@@ -2071,23 +2104,35 @@ function autoFit() {
   // while the resized grid arrives (transient horizontal overflow).
   if (target < FIT_MIN_READABLE_PX && requestPaneFit(avail)) {
     if (currentFontPx < FIT_MIN_READABLE_PX) applyFont(FIT_MIN_READABLE_PX);
+    $host.style.paddingLeft = ''; $host.style.paddingRight = ''; // no centering when narrowing
     return;
   }
-  // Pane too narrow for the viewport (best-fit font is uncomfortably large)
-  // → widen the window to fill the width at a comfortable density. Hold the
-  // font at the preferred size while the wider grid arrives.
-  if (target >= FIT_WIDEN_TRIGGER_PX && requestPaneWiden(avail)) {
+  // Wide viewport → a comfortable, CENTERED column at the preferred font,
+  // not a full-bleed terminal. Target a column count capped at the
+  // comfortable max (ttv-max-cols; 0 = fill width), resize the window to it
+  // in either direction, hold the preferred font, and center with margins.
+  // Triggered when the best-fit font would be uncomfortably large (pane too
+  // narrow) OR the capped column leaves real horizontal slack to center in.
+  const cw14 = measureCharWidth(FIT_PREFERRED_PX);
+  const cap = maxContentCols();
+  const fillCols = Math.floor(avail / cw14);
+  const desiredCols = (cap > 0) ? Math.min(cap, fillCols) : Math.min(FIT_MAX_COLS, fillCols);
+  const slack = avail - desiredCols * cw14;
+  if (target >= FIT_WIDEN_TRIGGER_PX || slack > 24) {
+    if (Math.abs(desiredCols - cols) > 4) requestPaneCols(desiredCols);
     applyFont(FIT_PREFERRED_PX);
+    centerGrid(avail, desiredCols, FIT_PREFERRED_PX);
     return;
   }
   if (target !== currentFontPx) applyFont(target);
+  centerGrid(avail, cols, currentFontPx);
 }
 
-// Ask the daemon to WIDEN the active pane's window so the viewport is filled
-// at FIT_PREFERRED_PX. The mirror of requestPaneFit (which only narrows).
-// Widen-only here; returns true if a resize was requested (caller holds the
-// preferred font while the grid catches up).
-function requestPaneWiden(avail) {
+// Resize the active pane's window to `targetCols` (EITHER direction) so the
+// grid renders at a comfortable, centered width on wide viewports. The mirror
+// of requestPaneFit (which only narrows for phone readability); guarded the
+// same way. Returns true if a resize was requested or is already pending.
+function requestPaneCols(targetCols) {
   if (!fitResizeOn()) return false;
   if (instanceReadOnly) return false;
   if (!tabIsActive()) return false;
@@ -2095,11 +2140,9 @@ function requestPaneWiden(avail) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   const p = panesCache.find(x => x.id === activePaneId);
   if (!p) return false;
-  const cw = measureCharWidth(FIT_PREFERRED_PX);
-  if (!cw || cw <= 0) return false;
-  const cols = Math.min(FIT_MAX_COLS, Math.floor(avail / cw));
-  // Widen-only, and only when meaningfully wider (avoid 1-col thrash).
-  if (cols <= (p.cols || 80) + 4) return false;
+  const cols = Math.max(20, Math.min(FIT_MAX_COLS, targetCols));
+  // Only act on a meaningful change (avoid 1-col thrash / resize spam).
+  if (Math.abs(cols - (p.cols || 80)) <= 4) return false;
   const now = Date.now();
   if (lastFitReq.pane === activePaneId && lastFitReq.cols === cols &&
       now - lastFitReq.ts < 5000) {
@@ -2107,7 +2150,7 @@ function requestPaneWiden(avail) {
   }
   lastFitReq = { pane: activePaneId, cols: cols, ts: now };
   ws.send(JSON.stringify({ t: 'resize', p: activePaneId, cols: cols, rows: p.rows || 24 }));
-  ttvDiag('fit-resize-widen', { pane: activePaneId, from_cols: p.cols, to_cols: cols });
+  ttvDiag('fit-resize-cols', { pane: activePaneId, from_cols: p.cols, to_cols: cols });
   return true;
 }
 
