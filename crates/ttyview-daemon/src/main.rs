@@ -143,6 +143,7 @@ async fn main() -> anyhow::Result<()> {
         uploads_dir: cli.uploads_dir.clone(),
         allowed_origins: cli.allow_origin.clone(),
         extra_static: Vec::new(),
+        max_scrollback: None,
     })
     .await
 }

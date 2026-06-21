@@ -76,6 +76,13 @@ pub struct RunOptions {
     /// registration. Paths must start with `/`. Empty = no extra
     /// routes (the bare-daemon default).
     pub extra_static: Vec<(String, Vec<u8>)>,
+    /// Per-pane scrollback retention cap (lines). `None` = the
+    /// `Screen::new` default (2000), deliberately conservative for
+    /// multi-session embedders (panel/tmux-web run 60+ panes, so a
+    /// big cap × many panes pins a lot of RAM). Single-user embedders
+    /// like mobile-cc set this high (e.g. 10_000) so a client can
+    /// scroll far back. Applied to every pane the live store creates.
+    pub max_scrollback: Option<usize>,
 }
 
 /// Defaults are intentionally conservative: loopback bind, no TLS, no
@@ -101,6 +108,7 @@ impl Default for RunOptions {
             uploads_dir: None,
             allowed_origins: Vec::new(),
             extra_static: Vec::new(),
+            max_scrollback: None,
         }
     }
 }
@@ -135,6 +143,7 @@ pub async fn run_with_options(
         uploads_dir: None,
         allowed_origins: Vec::new(),
         extra_static: Vec::new(),
+        max_scrollback: None,
     }).await
 }
 
@@ -143,7 +152,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
         demo_mode, read_only, config_dir, app_name, uploads_dir,
-        allowed_origins, extra_static,
+        allowed_origins, extra_static, max_scrollback,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -195,6 +204,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     info!("panel daemon starting; tmux socket = {:?}; bind = {addr}", socket);
     let mut store = PaneStore::new(rows, cols);
     store.set_tmux_socket(socket.map(String::from));
+    store.set_max_scrollback(max_scrollback);
     store.install_tracer_from_env().await;
 
     if demo_mode {

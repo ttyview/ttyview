@@ -226,6 +226,11 @@ pub struct PaneStore {
     /// `capture-pane -e` so resizes don't leave the panel pin blank
     /// until the next CC interaction.
     tmux_socket: Option<String>,
+    /// Per-pane scrollback retention cap (lines). `None` = leave the
+    /// `Screen::new` default (2000). Set by single-user embedders
+    /// (mobile-cc) to retain more history. Applied to every pane
+    /// created via `ensure` and preserved across resize/reseed.
+    max_scrollback: Option<usize>,
     /// Bytes-tracer (for parser bug repro): when env var `PANEL_TRACE_PANE`
     /// is set to a pane id at startup, every `%output` event for that pane
     /// gets appended to `PANEL_TRACE_FILE` (default
@@ -301,6 +306,7 @@ impl PaneStore {
             panes: Arc::new(DashMap::new()),
             default_size: (default_rows, default_cols),
             tmux_socket: None,
+            max_scrollback: None,
             tracer: None,
         }
     }
@@ -309,6 +315,12 @@ impl PaneStore {
     /// out to `tmux` for things like re-seeding from `capture-pane`.
     pub fn set_tmux_socket(&mut self, socket: Option<String>) {
         self.tmux_socket = socket;
+    }
+
+    /// Set the per-pane scrollback retention cap (lines). `None` leaves
+    /// the `Screen::new` default. Affects panes created after this call.
+    pub fn set_max_scrollback(&mut self, n: Option<usize>) {
+        self.max_scrollback = n;
     }
 
     /// Enable the optional bytes tracer (driven by env vars). Idempotent —
@@ -347,7 +359,11 @@ impl PaneStore {
             return existing;
         }
         let (rows, cols) = self.default_size;
-        let state = Arc::new(RwLock::new(PaneState::new(id.clone(), rows, cols)));
+        let mut pane_state = PaneState::new(id.clone(), rows, cols);
+        if let Some(n) = self.max_scrollback {
+            pane_state.term.screen.max_scrollback = n;
+        }
+        let state = Arc::new(RwLock::new(pane_state));
         let (tx, _rx) = broadcast::channel(PER_PANE_CHANNEL_CAPACITY);
         let slot = Arc::new(PaneSlot {
             state,
@@ -876,13 +892,21 @@ pub async fn seed_pane(
     let cy: u16 = g.next().and_then(|x| x.parse().ok()).unwrap_or(0);
     let cx: u16 = g.next().and_then(|x| x.parse().ok()).unwrap_or(0);
 
-    // 2. Scrollback + visible content. -S -1000 = up to 1000 lines back.
+    // 2. Scrollback + visible content. Capture back up to the pane's
+    // configured retention cap so a freshly-discovered pane seeds as much
+    // PRE-EXISTING tmux history as we'd actually keep. Defaults to 1000
+    // when unset — preserves prior behavior for multi-session embedders
+    // (panel/tmux-web) that don't raise the cap; capturing 10k lines ×
+    // 60 panes on attach would be a heavy burst there. mobile-cc sets a
+    // deep cap (10_000) so the phone sees real history right after attach.
+    let seed_lines = store.max_scrollback.unwrap_or(1000);
+    let start_arg = format!("-{seed_lines}");
     let mut cmd = Command::new("tmux");
     if let Some(s) = socket {
         cmd.arg("-L").arg(s);
     }
     let cap_out = cmd
-        .args(["capture-pane", "-p", "-e", "-S", "-1000", "-t", &id.0])
+        .args(["capture-pane", "-p", "-e", "-S", &start_arg, "-t", &id.0])
         .output()
         .await
         .context("tmux capture-pane")?;
@@ -893,7 +917,12 @@ pub async fn seed_pane(
     // 3. Replace term with one sized to the pane and replay bytes.
     let slot = store.ensure(id);
     let mut s = slot.state.write().await;
+    // Preserve the per-pane scrollback cap across the rebuild — Term::new
+    // resets it to the Screen default, which would silently drop a
+    // configured higher cap on every reseed.
+    let preserved_max = s.term.screen.max_scrollback;
     s.term = Term::new(rows, cols);
+    s.term.screen.max_scrollback = preserved_max;
     crate::feed_baseline(&mut s.term, &cap_out.stdout);
     // Restore cursor (1-based for CSI CUP).
     let cup = format!("\x1b[{};{}H", cy + 1, cx + 1);
@@ -1115,5 +1144,41 @@ mod tests {
             (LiveEvent::Output { .. }, LiveEvent::Tick { .. }) => {}
             other => panic!("expected (Output, Tick), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn max_scrollback_cap_applies_to_ensured_panes() {
+        // The mobile-cc deep-scrollback feature relies on the store
+        // pushing its configured cap onto every pane it creates. Default
+        // (unset) must leave the Screen default so multi-session embedders
+        // are unaffected; Some(n) must override it.
+        let default_store = PaneStore::new(24, 80);
+        let p = default_store.ensure(&PaneId("%1".into()));
+        let cap_default = p.state.read().await.term.screen.max_scrollback;
+
+        let mut deep_store = PaneStore::new(24, 80);
+        deep_store.set_max_scrollback(Some(10_000));
+        let p2 = deep_store.ensure(&PaneId("%1".into()));
+        assert_eq!(p2.state.read().await.term.screen.max_scrollback, 10_000);
+
+        // The deep cap must differ from the untouched default — otherwise
+        // this test would silently pass if the default ever became 10k.
+        assert_ne!(cap_default, 10_000);
+    }
+
+    #[tokio::test]
+    async fn max_scrollback_cap_survives_resize() {
+        // A resize rebuilds the pane's Term; the configured cap must be
+        // preserved across that rebuild (regression guard — Term::new
+        // resets it to the Screen default otherwise).
+        let mut store = PaneStore::new(24, 80);
+        store.set_max_scrollback(Some(7_777));
+        let pane = PaneId("%5".into());
+        store.ensure(&pane);
+        store
+            .apply(SourceEvent::Resized { pane: pane.clone(), rows: 30, cols: 100 })
+            .await;
+        let slot = store.get(&pane).unwrap();
+        assert_eq!(slot.state.read().await.term.screen.max_scrollback, 7_777);
     }
 }

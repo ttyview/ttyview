@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-06-21
+
+### Added
+
+- **Configurable per-pane scrollback retention** — new
+  `RunOptions.max_scrollback` (`None` keeps the 2000-line `Screen`
+  default, so multi-session embedders are unaffected). Plumbed through
+  `PaneStore::set_max_scrollback` → `ensure` and preserved across resize
+  **and** reseed.
+- **Deeper seed-on-attach** — `seed_pane` captures back up to the
+  configured retention cap (was a hardcoded `capture-pane -S -1000`), so a
+  freshly-discovered pane seeds as much pre-existing tmux history as the
+  daemon will keep.
+- **Adjustable, two-phase client scrollback load** — the hydrate backfill
+  is now driven by `ttv-scrollback-rows` (default 200). The view paints
+  the fast tail first, then back-fills the deeper history via a new
+  `scrollback-prefill` event (older rows prepended in idle rAF chunks).
+  Overlap is reconciled with `scrollback_push_count` so a live scroll-off
+  between the two fetches can't duplicate rows.
+
+### Fixed
+
+- **Scrollback prefill no longer yanks the view to the bottom.**
+  `#grid-host` now sets `overflow-anchor: none` and the prefill
+  compensates `scrollTop` absolutely, so the browser's native scroll
+  anchoring and our own adjustment no longer double-compensate. Adds an
+  `sb-prefill` diagnostic record (`anchorDelta`).
+- **Live-appended scrollback rows render content, not a blank band**
+  (#1) — `buildFrozenRow` handles the WS `scrollback-append` row shape.
+
+### Tests
+
+- e2e `scrolling.spec.ts`: `overflow-anchor` guard + a behavioral
+  no-yank-to-bottom test. Client `scrollback-prefill.test.ts`: the overlap
+  math (no-gap / live-gap / nothing-older). Rust `state::tests`: cap
+  applies to ensured panes + survives resize. All mutation-verified.
+
 ## [0.1.5] — 2026-06-18
 
 ### Added

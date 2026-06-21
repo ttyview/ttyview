@@ -358,6 +358,12 @@
   #grid-host {
     flex: 1;
     overflow: auto;
+    /* Disable native scroll anchoring: the background scrollback prefill
+       prepends rows above the viewport and compensates scrollTop itself.
+       With browser anchoring ON, both adjust → double-compensation drifts
+       the view to the bottom while history loads (see prefillScrollback's
+       anchorDelta diag). */
+    overflow-anchor: none;
     contain: layout style;
     font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', Menlo, Consolas, monospace;
     font-size: var(--ttv-font-size, 12px);
@@ -1592,27 +1598,82 @@ async function loadPanes() {
   }
 }
 
+// Fast-tail target for the FIRST paint on a pane open/switch. Kept small
+// so switching is instant even when the user configured a deep scrollback
+// — diag showed even 500 rows (30k cells) stalled mobile Chrome paint
+// ~1.7s, so the initial grid-loaded never carries more than this. The
+// deeper history is back-filled afterwards by loadDeepScrollback().
+const FAST_SCROLLBACK_ROWS = 200;
+
+// User-configured backfill depth. Embedders (mobile-cc) expose a settings
+// control that writes `ttv-scrollback-rows`; clamped so a bad value can't
+// request an unbounded grid. Capped at the daemon's retention ceiling
+// anyway — fetching more just returns what it has.
+function configuredScrollbackRows() {
+  let v = 200;
+  try {
+    const n = parseInt(localStorage.getItem('ttv-scrollback-rows'), 10);
+    if (Number.isFinite(n) && n >= 0) v = Math.min(n, 50000);
+  } catch (e) {}
+  return v;
+}
+
 async function loadGrid(paneId) {
   setStatus('loading…');
   try {
-    // max_scrollback=200 → ~4-5 viewports of history. Diag log showed
-    // even at 500 rows (30k cells), mobile Chrome paint stalled
-    // ~1.7s when the picker overlay opacity changed. Going to 200
-    // (~12k cells) puts us comfortably below the threshold. v0.0.3
-    // will add lazy-load-more on scroll-to-top to support reading
-    // deeper history without paying the upfront DOM cost.
-    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=200');
+    const want = configuredScrollbackRows();
+    const fast = Math.min(want, FAST_SCROLLBACK_ROWS);
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=' + fast);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const screen = await r.json();
-    // Phase 2: terminal-view plugin owns the rendering. Core just
-    // emits 'grid-loaded'; cell-grid (the default plugin) listens.
+    // Terminal-view plugin owns the rendering. Core just emits
+    // 'grid-loaded'; cell-grid (the default plugin) listens.
     try { window.ttyview._internal.emit('grid-loaded', { paneId, screen }); } catch (e) {
       console.error('grid-loaded handler threw', e);
     }
     setStatus('loaded ' + paneId, 'connected');
+    // Background back-fill: if the user wants more history than the fast
+    // tail, fetch the deeper window and hand the OLDER rows to the view to
+    // prepend in idle chunks. Fire-and-forget; guarded against pane switch.
+    if (want > fast) loadDeepScrollback(paneId, want, screen);
   } catch (e) {
     setStatus('grid error: ' + e.message, 'error');
   }
+}
+
+// Phase 2 of the scrollback load. Fetch the full configured depth in the
+// background and emit ONLY the rows older than the fast tail as a
+// 'scrollback-prefill' event; the cell-grid view prepends them in idle
+// chunks so deep history is ready when the user scrolls up without ever
+// blocking the tab switch. Overlap is computed via scrollback_push_count
+// so a concurrent live scroll-off between the two fetches can't duplicate
+// rows. `fastScreen` is the screen already rendered by the fast paint.
+async function loadDeepScrollback(paneId, want, fastScreen) {
+  try {
+    const r = await fetch('/panes/' + encodeURIComponent(paneId) + '/grid?max_scrollback=' + want);
+    if (!r.ok) return;
+    // Bail if the user switched panes while we were fetching.
+    if (paneId !== activePaneId) return;
+    const deep = await r.json();
+    const deepSb = deep.scrollback || [];
+    const fastSb = fastScreen.scrollback || [];
+    // Global line index = position in the lifetime stream of scrolled-off
+    // lines. The retained window [push_count - len, push_count) tells us
+    // which global indices each fetch holds. We already show the fast
+    // tail's oldest = p1 - s1; prepend every deep row older than that.
+    const p1 = fastScreen.scrollback_push_count || 0;
+    const s1 = fastSb.length;
+    const p2 = deep.scrollback_push_count || 0;
+    const s2 = deepSb.length;
+    const oldestShown = p1 - s1;
+    let prependCount = oldestShown - (p2 - s2);
+    if (prependCount > s2) prependCount = s2;
+    if (prependCount <= 0) return;
+    const older = deepSb.slice(0, prependCount);
+    try { window.ttyview._internal.emit('scrollback-prefill', { paneId, rows: older }); } catch (e) {
+      console.error('scrollback-prefill handler threw', e);
+    }
+  } catch (e) { /* background best-effort; ignore */ }
 }
 
 function connectWs() {
@@ -1690,6 +1751,11 @@ function connectWs() {
         console.error('cell-diff handler threw', e);
       }
     } else if (msg.t === 'grid-reset') {
+      // Diag (2026-06-19): a reset triggers an ASYNC re-seed (loadPanes →
+      // loadGrid HTTP fetch). Logging it lets us see, in the timeline,
+      // whether cell-diff-drops cluster in the window between this reset
+      // and the grid-built that follows it.
+      ttvDiag('grid-reset', { pane: activePaneId, alt: !!msg.alt });
       // Refresh /panes BEFORE the grid: a reset is usually a resize,
       // and the post-load autoFit reads cols from panesCache — stale
       // cols would re-fit the font against the old width.
@@ -1931,6 +1997,14 @@ function fitResizeOn() {
   return localStorage.getItem('ttv-fit-resize') !== 'false'; // default on
 }
 
+// Only the device actually in front of the user should size the shared
+// window. A hidden/backgrounded tab must not narrow it.
+function tabIsActive() {
+  return typeof document === 'undefined' ||
+    document.visibilityState === undefined ||
+    document.visibilityState === 'visible';
+}
+
 // Pane width comes from panesCache (panel daemon is authoritative).
 // Was a tracked-from-buildGrid variable in Phase 1; now part of the
 // platform contract so the plugin doesn't need to push it back.
@@ -2000,6 +2074,9 @@ function autoFit() {
 function requestPaneFit(avail) {
   if (!fitResizeOn()) return false;
   if (instanceReadOnly) return false;
+  // Don't narrow the shared window while we're not the active device —
+  // otherwise a backgrounded phone fights the desktop for the size.
+  if (!tabIsActive()) return false;
   if (!activePaneId) return false;
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   const p = panesCache.find(x => x.id === activePaneId);
@@ -2017,6 +2094,19 @@ function requestPaneFit(avail) {
   ws.send(JSON.stringify({ t: 'resize', p: activePaneId, cols: cols, rows: p.rows || 24 }));
   ttvDiag('fit-resize', { pane: activePaneId, from_cols: p.cols, to_cols: cols });
   return true;
+}
+
+// When this device returns to the foreground, re-fit (it may need to
+// re-narrow the window for readability). We deliberately do NOT auto-
+// release on hide: the shared window stays at the size the last active
+// device left it, and the desktop reclaims its own size only when it's
+// actively clicked (a tmux MouseDown binding clears the fit lock on
+// click). The daemon still auto-releases on full WS disconnect as a
+// safety net so a closed phone never pins the window forever.
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'visible') autoFit();
+  });
 }
 
 document.getElementById('font-down').addEventListener('click', function() {
@@ -2931,6 +3021,12 @@ window.ttyview.contributes.terminalView({
     let cells = new Map();   // "r,c" -> <span>
     let pendingDiffs = [];
     let diffRafId = 0;
+    // Bumped on every full rebuild / clear. A background scrollback
+    // prefill captures this at start and aborts its chunk loop if it
+    // changes (pane switch, reset) so stale older-history can't land in
+    // the wrong pane's view.
+    let buildGen = 0;
+    let prefillRafId = 0;
 
     // === Color decoding ===
     // Panel serializes colors as Rust enum variants with default
@@ -3043,6 +3139,10 @@ window.ttyview.contributes.terminalView({
       // the main thread.
       pendingDiffs = [];
       if (diffRafId) { cancelAnimationFrame(diffRafId); diffRafId = 0; }
+      // Invalidate any background scrollback prefill from a prior load —
+      // its rows belong to the screen we're about to replace.
+      buildGen++;
+      if (prefillRafId) { cancelAnimationFrame(prefillRafId); prefillRafId = 0; }
       $empty.style.display = 'none';
       $sbHost.innerHTML = '';
       $primaryHost.innerHTML = '';
@@ -3075,6 +3175,43 @@ window.ttyview.contributes.terminalView({
         }
         $primaryHost.appendChild(row);
       }
+      // Diag (2026-06-19): record the extent this re-seed produced. Pairs
+      // with cell-diff-drop — a drop whose diff_max_r/c exceeds the rows/cols
+      // logged here proves the snapshot was smaller than the live grid.
+      // Diag (2026-06-21): also profile BLANK rows in the snapshot. The
+      // mcc17 "black top band" is rows present-but-blank, NOT dropped cells —
+      // it happens when a re-seed (resume-from-background / tab-switch) fetches
+      // the server grid mid-CC-redraw and captures a cleared-but-not-repainted
+      // frame. blank_top = leading all-blank primary rows; if a black band
+      // shows on screen and blank_top matches its height, this is the cause.
+      var blankTotal = 0, blankTop = 0, sawNonBlank = false, blankMap = '';
+      for (var br = 0; br < lines.length; br++) {
+        var rc = lines[br].cells || [];
+        var rowBlank = true;
+        for (var bc = 0; bc < rc.length; bc++) {
+          var bch = rc[bc].ch;
+          if (bch && bch !== ' ') { rowBlank = false; break; }
+        }
+        blankMap += rowBlank ? '#' : '.';
+        if (rowBlank) {
+          blankTotal++;
+          if (!sawNonBlank) blankTop++;
+        } else {
+          sawNonBlank = true;
+        }
+      }
+      ttvDiag('grid-built', {
+        rows: lines.length,
+        cols: lines.length ? (lines[0].cells || []).length : 0,
+        sb_rows: sb.length,
+        blank_total: blankTotal,
+        blank_top: blankTop,
+        blank_map: blankMap,
+        pane: (ctx.api.getActivePane() && ctx.api.getActivePane().id) || null,
+      });
+      // Snapshot may already contain the band; also scan the live DOM after
+      // a tick so 'build' vs 'flush' src tells us snapshot-vs-diff origin.
+      requestAnimationFrame(function() { scanBlankBand('build'); scanScrollbackBand('build'); });
       // Run autofit AFTER cells are in the DOM (probe needs accurate
       // metrics; font may not have loaded yet).
       requestAnimationFrame(autoFit);
@@ -3082,15 +3219,25 @@ window.ttyview.contributes.terminalView({
       host.scrollTop = host.scrollHeight;
     }
     function applyCellDiff(diff) {
+      // Diag (2026-06-19): track cells that land on a row/col with no DOM
+      // node. Those updates are silently lost and the region renders as
+      // background (black) until a full re-seed — the suspected cause of
+      // the intermittent mid-transcript "black space" on mobile. maxR/maxC
+      // record the diff's extent so flushDiffs can compare it to the grid
+      // extent and tell row-overflow from col-overflow.
+      let dropped = 0, maxR = -1, maxC = -1;
       for (const e of diff.cells) {
+        if (e.r > maxR) maxR = e.r;
+        if (e.c > maxC) maxC = e.c;
         const node = cells.get(e.r + ',' + e.c);
-        if (!node) continue;
+        if (!node) { dropped++; continue; }
         const ch = (e.width === 0) ? '' : (e.ch || ' ');
         if (node.textContent !== ch) node.textContent = ch;
         applyCellStyle(node, e);
         const desired = cellClassFor(e.width);
         if (node.className !== desired) node.className = desired;
       }
+      return { dropped: dropped, maxR: maxR, maxC: maxC };
     }
     // rAF queue for cell-diff events. Multiple WS frames in the same
     // animation-frame collapse into one DOM-mutation pass — keeps tap
@@ -3099,14 +3246,36 @@ window.ttyview.contributes.terminalView({
       diffRafId = 0;
       const batch = pendingDiffs;
       pendingDiffs = [];
-      let totalCells = 0;
+      let totalCells = 0, totalDropped = 0, batchMaxR = -1, batchMaxC = -1;
       const t0 = performance.now();
       for (const d of batch) {
         if (d.p !== ctx.api.getActivePane()?.id) continue;
-        applyCellDiff(d);
+        const st = applyCellDiff(d);
         totalCells += (d.cells && d.cells.length) || 0;
+        totalDropped += st.dropped;
+        if (st.maxR > batchMaxR) batchMaxR = st.maxR;
+        if (st.maxC > batchMaxC) batchMaxC = st.maxC;
       }
       const dur = performance.now() - t0;
+      // Smoking-gun (2026-06-19): cell-diffs landed on positions with no DOM
+      // node. grid_rows/grid_cols are the current DOM extent; if diff_max_r
+      // >= grid_rows it's a ROW overflow (pane grew taller), if diff_max_c
+      // >= grid_cols it's a COL overflow (pane grew wider) — either way the
+      // updates are lost until a full re-seed, leaving black space.
+      if (totalDropped > 0) {
+        const gridRows = $primaryHost.children.length;
+        const gridCols = gridRows ? $primaryHost.children[0].children.length : 0;
+        ttvDiag('cell-diff-drop', {
+          dropped: totalDropped,
+          applied: totalCells - totalDropped,
+          total: totalCells,
+          diff_max_r: batchMaxR,
+          diff_max_c: batchMaxC,
+          grid_rows: gridRows,
+          grid_cols: gridCols,
+          pane: ctx.api.getActivePane()?.id || null,
+        });
+      }
       if (dur > 4 || totalCells > 100) {
         ttvDiag('diff-flush', {
           batch: batch.length,
@@ -3114,9 +3283,124 @@ window.ttyview.contributes.terminalView({
           dur_ms: +dur.toFixed(2),
         });
       }
+      scanBlankBand('flush');
+    }
+    // Diag (2026-06-21): the REAL "black band" is a contiguous run of blank
+    // rows in the LIVE primary DOM — and it often forms AFTER the snapshot
+    // via diffs (CC blanks a region during a redraw and the repaint never
+    // lands / lands elsewhere), so grid-built counters miss it entirely.
+    // Scan the rendered rows, find the largest INTERIOR blank run (content
+    // both above and below). A run >= 5 rows is the visible band. 'map' is a
+    // per-row bitmap (#=blank .=content); 'src' = build|flush tells us whether
+    // the snapshot or a later diff introduced it. Logged only on signature
+    // change, so a stable band logs once, not every frame.
+    var lastBandSig = '';
+    function scanBlankBand(src) {
+      var rows = $primaryHost.children;
+      var n = rows.length;
+      if (!n) { lastBandSig = ''; return; }
+      var blanks = [], firstContent = -1, lastContent = -1, map = '';
+      for (var i = 0; i < n; i++) {
+        var blank = (rows[i].textContent || '').trim() === '';
+        blanks.push(blank);
+        map += blank ? '#' : '.';
+        if (!blank) { if (firstContent < 0) firstContent = i; lastContent = i; }
+      }
+      if (firstContent < 0) { lastBandSig = ''; return; }  // all-blank ≠ band
+      var bestLen = 0, bestStart = -1, curStart = -1;
+      for (var j = firstContent + 1; j < lastContent; j++) {
+        if (blanks[j]) {
+          if (curStart < 0) curStart = j;
+          var len = j - curStart + 1;
+          if (len > bestLen) { bestLen = len; bestStart = curStart; }
+        } else {
+          curStart = -1;
+        }
+      }
+      if (bestLen >= 5) {
+        var sig = bestStart + ':' + bestLen + ':' + map;
+        if (sig !== lastBandSig) {
+          lastBandSig = sig;
+          ttvDiag('blank-band', {
+            src: src,
+            run_start: bestStart,
+            run_len: bestLen,
+            rows: n,
+            map: map,
+            pane: ctx.api.getActivePane()?.id || null,
+          });
+        }
+      } else {
+        lastBandSig = '';
+      }
+    }
+    // Diag (2026-06-21): the mid-transcript black band is in the FROZEN
+    // SCROLLBACK ($sbHost), not primary — that's why every primary-only probe
+    // came back clean. Scrollback rows are immutable once written, so a blank
+    // run here is permanent until a fresh re-seed (tab switch). This scans the
+    // rendered scrollback DOM for the longest interior blank run; src tells us
+    // whether it came in via the snapshot ('build') or a live append ('sbapp').
+    var lastSbBandSig = '';
+    function scanScrollbackBand(src) {
+      var rows = $sbHost.children;
+      var n = rows.length;
+      if (!n) { lastSbBandSig = ''; return; }
+      var firstContent = -1, lastContent = -1, blanks = new Array(n);
+      for (var i = 0; i < n; i++) {
+        var blank = (rows[i].textContent || '').trim() === '';
+        blanks[i] = blank;
+        if (!blank) { if (firstContent < 0) firstContent = i; lastContent = i; }
+      }
+      if (firstContent < 0) { lastSbBandSig = ''; return; }
+      var bestLen = 0, bestStart = -1, curStart = -1;
+      for (var j = firstContent + 1; j < lastContent; j++) {
+        if (blanks[j]) {
+          if (curStart < 0) curStart = j;
+          var len = j - curStart + 1;
+          if (len > bestLen) { bestLen = len; bestStart = curStart; }
+        } else { curStart = -1; }
+      }
+      if (bestLen >= 5) {
+        var sig = bestStart + ':' + bestLen + ':' + n;
+        if (sig !== lastSbBandSig) {
+          lastSbBandSig = sig;
+          ttvDiag('sb-band', {
+            src: src,
+            run_start: bestStart,
+            run_len: bestLen,
+            sb_rows: n,
+            pane: ctx.api.getActivePane()?.id || null,
+          });
+        }
+      } else {
+        lastSbBandSig = '';
+      }
     }
     function appendScrollback(evt) {
       if (!evt.rows || evt.rows.length === 0) return;
+      // Diag (2026-06-21): catch blank rows arriving via scrollback-append at
+      // the SOURCE. A run of blank rows pushed here freezes into the band.
+      var blankCount = 0, appMap = '';
+      for (var k = 0; k < evt.rows.length; k++) {
+        var rcells = evt.rows[k].cells || evt.rows[k] || [];
+        var rb = true;
+        for (var m = 0; m < rcells.length; m++) {
+          var rch = rcells[m] && rcells[m].ch;
+          if (rch && rch !== ' ') { rb = false; break; }
+        }
+        appMap += rb ? '#' : '.';
+        if (rb) blankCount++;
+      }
+      if (blankCount > 0) {
+        ttvDiag('sb-append-blank', {
+          total: evt.rows.length,
+          blank: blankCount,
+          map: appMap,
+          from_count: evt.from_count != null ? evt.from_count : null,
+          to_count: evt.to_count != null ? evt.to_count : null,
+          pane: ctx.api.getActivePane()?.id || null,
+        });
+      }
       // Preserve the user's reading position. If they're at the live tail,
       // stay glued. If they're scrolled up reading history, don't yank them.
       const wasAtBottom = (host.scrollHeight - host.scrollTop - host.clientHeight) < 30;
@@ -3126,6 +3410,58 @@ window.ttyview.contributes.terminalView({
       }
       $sbHost.appendChild(frag);
       if (wasAtBottom) host.scrollTop = host.scrollHeight;
+      scanScrollbackBand('sbapp');
+    }
+
+    // Background-filled older history (core's loadDeepScrollback). The
+    // rows are older than everything currently in $sbHost and arrive in
+    // scrollback order (oldest→newest). Prepend them ABOVE the existing
+    // frozen rows in idle chunks so a deep scrollback never janks the tab
+    // switch, anchoring scroll so the viewport doesn't jump. Inserting
+    // each older chunk before the current first child yields the correct
+    // final order: [evt.rows…, previously-shown…].
+    function prefillScrollback(evt) {
+      if (!evt || !evt.rows || !evt.rows.length) return;
+      const active = ctx.api.getActivePane();
+      if (!active || evt.paneId !== active.id) return;
+      const rows = evt.rows;
+      const myGen = buildGen;
+      const CHUNK = 300;
+      let i = rows.length;          // walk newest-older block first
+      function step() {
+        prefillRafId = 0;
+        if (myGen !== buildGen) return;   // superseded by a rebuild/clear
+        if (i <= 0) return;
+        const beforeTop = host.scrollTop;
+        const beforeHeight = host.scrollHeight;
+        const clientH = host.clientHeight;
+        const wasAtBottom = (beforeHeight - beforeTop - clientH) < 30;
+        const start = Math.max(0, i - CHUNK);
+        const frag = document.createDocumentFragment();
+        for (let j = start; j < i; j++) frag.appendChild(buildFrozenRow(rows[j]));
+        i = start;
+        $sbHost.insertBefore(frag, $sbHost.firstChild);
+        // The browser's OWN scroll anchoring (overflow-anchor) may already
+        // have moved scrollTop in response to the insert-above. If it did
+        // AND we then add the inserted height again, we double-compensate
+        // and the view drifts toward the bottom — the reported "scrolled
+        // back to bottom while history is still loading" bug. #grid-host
+        // sets `overflow-anchor: none` so this stays ~0; we then do the
+        // ONE deterministic compensation below (absolute, from the
+        // pre-insert top — not `+=`, so any residual anchor drift can't
+        // accumulate across chunks).
+        const anchorDelta = host.scrollTop - beforeTop;
+        const added = host.scrollHeight - beforeHeight;
+        if (wasAtBottom) host.scrollTop = host.scrollHeight;
+        else host.scrollTop = beforeTop + added;
+        ttvDiag('sb-prefill', {
+          atBottom: wasAtBottom, beforeTop: Math.round(beforeTop),
+          added: Math.round(added), anchorDelta: Math.round(anchorDelta),
+          finalTop: Math.round(host.scrollTop), left: i,
+        });
+        if (i > 0) prefillRafId = requestAnimationFrame(step);
+      }
+      prefillRafId = requestAnimationFrame(step);
     }
 
     // === Tap-prompt-to-focus: short tap on CC's prompt row focuses
@@ -3178,15 +3514,21 @@ window.ttyview.contributes.terminalView({
       if (!diffRafId) diffRafId = requestAnimationFrame(flushDiffs);
     });
     const offSb = ctx.api.on('scrollback-append', appendScrollback);
+    const offPrefill = ctx.api.on('scrollback-prefill', prefillScrollback);
     const offClear = ctx.api.on('pane-clearing', function() {
+      // Same invalidation as buildGrid — kill any in-flight prefill so its
+      // older rows don't land after the clear.
+      buildGen++;
+      if (prefillRafId) { cancelAnimationFrame(prefillRafId); prefillRafId = 0; }
       $sbHost.innerHTML = '';
       $primaryHost.innerHTML = '';
       cells = new Map();
     });
 
     return function unmount() {
-      offGrid(); offDiff(); offSb(); offClear();
+      offGrid(); offDiff(); offSb(); offPrefill(); offClear();
       if (diffRafId) { cancelAnimationFrame(diffRafId); diffRafId = 0; }
+      if (prefillRafId) { cancelAnimationFrame(prefillRafId); prefillRafId = 0; }
       pendingDiffs = [];
       cells = new Map();
       host.innerHTML = '';
