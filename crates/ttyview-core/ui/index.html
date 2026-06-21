@@ -3009,7 +3009,14 @@ window.ttyview.contributes.terminalView({
     function buildFrozenRow(rowSpec) {
       const row = document.createElement('div');
       row.className = 'ttv-row frozen';
-      const rowCells = rowSpec.cells || [];
+      // rowSpec comes in TWO shapes: a Line object `{cells, wrapped}` from
+      // buildGrid's snapshot (`screen.scrollback[r]`), OR a raw cell array
+      // from appendScrollback (the WS `scrollback-append` event ships
+      // `rows: Vec<Vec<Cell>>`). Without this normalization the array form
+      // hit `rowSpec.cells === undefined` and every live-scrolled-off row
+      // rendered BLANK — the mid-transcript "black band" that a reload (which
+      // re-renders via the snapshot path) made disappear.
+      const rowCells = (Array.isArray(rowSpec) ? rowSpec : rowSpec && rowSpec.cells) || [];
       for (let c = 0; c < rowCells.length; c++) {
         const cell = rowCells[c];
         const width = cell.width != null ? cell.width : 1;
