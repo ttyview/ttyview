@@ -83,6 +83,17 @@ pub struct RunOptions {
     /// like mobile-cc set this high (e.g. 10_000) so a client can
     /// scroll far back. Applied to every pane the live store creates.
     pub max_scrollback: Option<usize>,
+    /// Embedder hook to mount extra HTTP routes on the daemon's axum
+    /// router. The closure receives the fully-built, state-less
+    /// `Router` (after every core route + the `extra_static` fallback)
+    /// and returns it with additional routes merged. Carry your own
+    /// per-route state via `axum::Extension` layers — `AppState` is
+    /// private to core, so extra routes can't share it. Runs once at
+    /// startup. `None` = no extra routes (the bare-daemon default).
+    /// Used by mobile-cc to mount `/api/cc-search` (CC-transcript
+    /// search); also the lane the future Web Push `/api/push/*` routes
+    /// will use.
+    pub extra_api: Option<Box<dyn FnOnce(axum::Router) -> axum::Router + Send>>,
 }
 
 /// Defaults are intentionally conservative: loopback bind, no TLS, no
@@ -109,6 +120,7 @@ impl Default for RunOptions {
             allowed_origins: Vec::new(),
             extra_static: Vec::new(),
             max_scrollback: None,
+            extra_api: None,
         }
     }
 }
@@ -144,6 +156,7 @@ pub async fn run_with_options(
         allowed_origins: Vec::new(),
         extra_static: Vec::new(),
         max_scrollback: None,
+        extra_api: None,
     }).await
 }
 
@@ -152,7 +165,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         addr, socket, rows, cols,
         tls_cert, tls_key, diag_log, registry_url,
         demo_mode, read_only, config_dir, app_name, uploads_dir,
-        allowed_origins, extra_static, max_scrollback,
+        allowed_origins, extra_static, max_scrollback, extra_api,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -326,6 +339,13 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         state: state_store,
         extra_static: std::sync::Arc::new(extra_static.into_iter().collect()),
     });
+    // Embedder-mounted routes (mobile-cc's /api/cc-search, future Web
+    // Push). Applied last so they sit on top of the finished router;
+    // they bring their own state via Extension layers.
+    let app = match extra_api {
+        Some(hook) => hook(app),
+        None => app,
+    };
     // 3. Wait for a shutdown signal — used by both HTTP and TLS paths.
     let shutdown = async {
         let mut sigterm = signal(SignalKind::terminate()).expect("sigterm handler");
