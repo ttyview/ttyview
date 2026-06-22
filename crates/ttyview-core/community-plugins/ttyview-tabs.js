@@ -15,10 +15,24 @@
 // per group.
 //
 // A vertical utility rail sits on the RIGHT edge of the area (thumb
-// side) with two mode buttons: ▦ = all sessions (every tmux session,
-// alphabetical), 🕘 = recent (MRU, most-recent first). Tap to switch
-// into the mode; tap the lit one to return to pinned. In both modes,
-// tap a tab to switch, long-press to pin/unpin.
+// side) with four buttons: ▦ = all sessions (every tmux session,
+// alphabetical), 🕘 = recent (MRU, most-recent first), a 📌 pushpin
+// that toggles PIN MODE (tap tabs to pin/unpin while lit), and a ✎
+// pencil that toggles LABEL MODE (tap a tab to inline-edit its custom
+// label while lit). Tap a mode to switch into it; tap the lit one to
+// return to pinned. In every mode, tap a tab to switch and long-press
+// to cycle its todo/done mark.
+//
+// Custom tab tags (per-session, tmux-web "subtitle" style): the ✎ rail
+// toggle enters tag mode; tapping a tab opens an inline input on a
+// SECOND LINE under the tab name. A tag is a separate annotation, NOT a
+// rename — the name line and the real tmux session are untouched, so
+// grouping / pins / marks / recents / dots all keep working off the true
+// name. A tagged tab switches to a two-line stack but keeps the SAME
+// fixed height (shrunk line-heights, like tmux-web keeps tabs uniform);
+// untagged tabs are visually unchanged. Empty clears the tag. Tags live
+// in the synced storage namespace (LABELS_KEY), carrying across devices
+// like pins/marks.
 //
 // Above the groups, an always-on RECENT ROW (toggle in Settings)
 // shows the most-recently-used sessions across all groups, newest
@@ -30,6 +44,18 @@
 // amber pulsing = Claude Code permission prompt open (semantic
 // events), blue pulsing = recent output (idle_ms poll), orange =
 // finished since last viewed. See the "status dots" section below.
+//
+// Manual todo/done marks (per-session, tmux-web "cycle" gesture): press
+// and HOLD a tab — one continuous press advances through stages, one
+// `markDelay()` apart (default 500ms, adjustable in Settings):
+//   from none  → todo (pink) → done (green)
+//   from todo  → none        → done (green)
+//   from done  → none        → todo (pink)
+// Release at any stage locks that mark; finger drift > 36px cancels
+// (generous so a wobbling thumb keeps the hold; only a real scroll aborts).
+// Marks show as a left-edge stripe. Pin/unpin lives on the rail's
+// pushpin toggle (tap it to enter pin mode, then tap tabs to pin/unpin).
+// Both the marks and the pins persist in the synced storage namespace.
 //
 // Pin state persists via the per-plugin storage namespace, keyed by
 // SESSION NAME (with pane id kept as a fast-path resolver) — so the
@@ -56,8 +82,17 @@
   const STORAGE_KEY = 'pins';
   const SETTINGS_KEY = 'settings';
   const GROUPS_KEY = 'groups';
+  const MARKS_KEY = 'marks';
+  const LABELS_KEY = 'labels';   // per-session custom display label (cosmetic alias)
   const LONG_PRESS_MS = 500;
-  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true };  // maxPerRow 0 = unlimited per row
+  // Finger-drift tolerance for the press-and-hold mark gesture. Generous
+  // on purpose: a hold is meant to stay put, but thumbs wobble — a tight
+  // threshold made the mark abort whenever the finger shifted slightly
+  // mid-press. Still small enough that a deliberate horizontal scroll of
+  // a tab row (which travels much further) cancels as before.
+  const MARK_DRIFT_PX = 36;
+  const MARK_BUBBLE_LIFT = 72;   // px the state popup floats above the tab top (clear of the fingertip)
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row
   const RECENTS_KEY = 'recents';
   const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row
   const RECENT_STORE_MAX = 30;  // MRU entries kept in storage
@@ -77,7 +112,41 @@
     const v = storage.get(GROUPS_KEY);
     return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
   })();
-  let editingId = null;
+  // ---- manual todo/done marks (per-session, user-set) ----
+  // A session-keyed map { session: 'todo'|'done' }; absent = unmarked.
+  // Long-press a tab cycles nothing → todo → done → nothing (tmux-web
+  // style). Stored in the synced namespace, so marks carry across
+  // devices like pins do.
+  let marks = (function() {
+    const v = storage.get(MARKS_KEY);
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  })();
+  // ---- custom tab labels (per-session cosmetic alias) ----
+  // A session-keyed map { session: 'custom text' }; absent = use the
+  // default (group-stripped digit, or full session name). PURELY
+  // COSMETIC: the real tmux session keeps its name, so grouping, pins,
+  // marks, recents and dots all keep working off the true name — only
+  // the tab's visible text changes (its title= always shows the real
+  // name). Stored in the synced namespace, so labels carry across
+  // devices like pins/marks do.
+  let labels = (function() {
+    const v = storage.get(LABELS_KEY);
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  })();
+  // Pin mode: a transient toggle (rail pushpin button) that turns every
+  // tab tap into a pin/unpin instead of a pane switch. Not persisted —
+  // it's a momentary editing posture, like movingGroup.
+  let pinMode = false;
+  // Label mode: sibling transient toggle (rail ✎ button) — turns every
+  // tab tap into an inline label edit instead of a pane switch. Mutually
+  // exclusive with pinMode; not persisted.
+  let labelMode = false;
+  // True while an inline label editor is open. Background re-renders
+  // (status-dot poll, pane-changed / panes-updated / semantic events)
+  // call render(), which rebuilds the slot via innerHTML='' — that would
+  // destroy the focused <input> mid-edit and slam the on-screen keyboard
+  // shut. While this is set, render() no-ops; commit() clears it first.
+  let editingActive = false;
   let movingGroup = null;       // group name in ▲▼ move mode (long-press a header)
   let suppressHeadTap = false;  // swallow the pointerup that completes a header
                                 // long-press: render() replaces the header mid-
@@ -92,6 +161,117 @@
   function savePins()      { storage.set(STORAGE_KEY,  pins);      }
   function saveSettings()  { storage.set(SETTINGS_KEY, settings);  }
   function saveGroups()    { storage.set(GROUPS_KEY,   groupsCfg); }
+  function saveMarks()     { storage.set(MARKS_KEY,    marks);     }
+  function saveLabels()    { storage.set(LABELS_KEY,   labels);    }
+
+  // Custom display label for a session, or null when none is set.
+  function labelOf(session) { return (session && labels[session]) || null; }
+  // Set / clear a session's custom label. Empty (or whitespace) clears.
+  function setLabel(session, text) {
+    if (!session) return;
+    text = (text || '').trim();
+    if (text) labels[session] = text; else delete labels[session];
+    saveLabels();
+    if (typeof window.ttvDiag === 'function') window.ttvDiag('tab-label', { session: session, label: text || null });
+  }
+
+  function marksOn() { return settings.marks !== false; }
+  function markOf(session) { return (marksOn() && session && marks[session]) || null; }
+  // Hold duration per gesture stage (ms). One value governs both the
+  // initial press threshold and the promote-to-next-stage interval —
+  // matching tmux-web's single `dotDelay` knob.
+  function markDelay() {
+    const v = parseInt(settings.markDelay, 10);
+    return (v >= 100 && v <= 4000) ? v : 500;
+  }
+  // Tab/header/rail row height in px (Settings → Tab height). Clamped to
+  // a sane touch-target range; 28 is the original fixed value.
+  function tabHeight() {
+    const v = parseInt(settings.tabHeight, 10);
+    return (v >= 20 && v <= 72) ? v : 28;
+  }
+  function setMark(session, mark) {
+    if (mark) marks[session] = mark; else delete marks[session];
+    saveMarks();
+    if (typeof window.ttvDiag === 'function') window.ttvDiag('tab-mark', { session: session, mark: mark || null });
+  }
+  // Reflect a session's mark on a live tab element WITHOUT a full
+  // re-render — used for in-hold feedback. Rendering mid-gesture would
+  // detach the very button being pressed and kill its pointer stream,
+  // so the stripe is toggled in place; a render() on pointerup syncs
+  // any duplicate tabs of the same session.
+  function applyStripe(btn, mark) {
+    btn.classList.remove('mark-todo', 'mark-done');
+    if (mark === 'todo' || mark === 'done') btn.classList.add('mark-' + mark);
+  }
+
+  // ---- mark popup (floating state indicator above the pressed tab) ----
+  // The finger covers the tab (and its stripe) mid-hold, so the current
+  // mark is echoed in a bubble ABOVE the tab — above the thumb. One
+  // shared element; updates live as the gesture promotes, fades on
+  // release. tmux-web's dot-toggle-bubble, made persistent for the hold.
+  function markPopupOn() { return settings.markPopup !== false; }
+  const MARK_SPEC = { todo: ['#f7768e', 'todo'], done: ['#9ece6a', 'done'] };
+  let markBubbleEl = null;
+  let markBubbleTimer = null;
+  function showMarkBubble(btn, mark) {
+    if (!markPopupOn()) return;
+    if (markBubbleTimer) { clearTimeout(markBubbleTimer); markBubbleTimer = null; }
+    if (!markBubbleEl) {
+      markBubbleEl = document.createElement('div');
+      markBubbleEl.className = 'ttvtab-markbubble';
+      document.body.appendChild(markBubbleEl);
+    }
+    const spec = MARK_SPEC[mark];
+    const dot = spec
+      ? '<span class="mb-dot" style="background:' + spec[0] + '"></span>'
+      : '<span class="mb-dot mb-none"></span>';
+    markBubbleEl.innerHTML = dot + '<span>' + (spec ? spec[1] : 'none') + '</span>';
+    // Tint the border (and arrow) to the state colour — pink/green, or
+    // a neutral muted edge for "none".
+    const edge = spec ? spec[0] : 'var(--ttv-muted)';
+    markBubbleEl.style.borderColor = edge;
+    markBubbleEl.style.setProperty('--mb-edge', edge);
+    const r = btn.getBoundingClientRect();
+    // translate(-50%) in CSS means `left` is the bubble's CENTER, so a
+    // leftmost/rightmost tab would push the bubble off-screen. Clamp the
+    // center using the populated bubble's width so it stays fully visible.
+    const mbHalf = markBubbleEl.offsetWidth / 2;
+    const MB_MARGIN = 6;
+    const mbCenter = Math.max(
+      mbHalf + MB_MARGIN,
+      Math.min(r.left + r.width / 2, window.innerWidth - mbHalf - MB_MARGIN)
+    );
+    markBubbleEl.style.left = mbCenter + 'px';
+    // Lift it well clear of the fingertip — the bubble's bottom sits
+    // MARK_BUBBLE_LIFT px above the tab top (translate(-50%,-100%) in
+    // CSS anchors its bottom edge here). 8px was under the finger.
+    markBubbleEl.style.top = (r.top - MARK_BUBBLE_LIFT) + 'px';
+    markBubbleEl.style.opacity = '1';
+  }
+  function hideMarkBubble() {
+    if (!markBubbleEl) return;
+    const el = markBubbleEl;
+    el.style.opacity = '0';
+    markBubbleTimer = setTimeout(function() {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      if (markBubbleEl === el) markBubbleEl = null;
+      markBubbleTimer = null;
+    }, 240);
+  }
+
+  // pin/unpin by session name — used by pin-mode taps (the rail pushpin).
+  function togglePin(session, paneId) {
+    if (!session) return;
+    if (pins.find(p => p.session === session)) {
+      pins = pins.filter(p => p.session !== session);
+    } else {
+      pins.push({ id: paneId, session: session });
+    }
+    savePins();
+    if (typeof window.ttvDiag === 'function') window.ttvDiag('tab-pin', { session: session, pinned: !!pins.find(p => p.session === session) });
+    render();
+  }
 
   // ---- recents (MRU across all sessions) ----
   // A plain most-recently-used list of SESSION NAMES, newest first.
@@ -349,8 +529,9 @@
            get taller line boxes than Latin text on Android, which made
            the measured row height (and therefore the whole section)
            differ between pinned and all modes: 86px vs 92px, a 6px
-           jump on every toggle (caught via tabs-geom diag records). */
-        height: 28px;
+           jump on every toggle (caught via tabs-geom diag records).
+           Height is a CSS var (Settings → Tab height); 28px fallback. */
+        height: var(--ttv-tab-h, 28px);
         box-sizing: border-box;
         padding: 0 10px;
         font-size: 12px;
@@ -373,6 +554,117 @@
         color: var(--ttv-accent);
       }
       .ttvtab.missing { opacity: 0.45; font-style: italic; }
+      /* ---- manual todo/done marks (left-edge stripe) ---- */
+      /* inset box-shadow, not a border — draws inside the box so it
+         never shifts the tab's width or content padding. */
+      .ttvtab.mark-todo { box-shadow: inset 3px 0 0 0 #f7768e; }
+      .ttvtab.mark-done { box-shadow: inset 3px 0 0 0 #9ece6a; }
+      /* Floating state popup above the pressed tab (finger hides the
+         stripe). position:fixed so getBoundingClientRect coords map
+         straight to viewport; translate lifts it clear above the tab. */
+      .ttvtab-markbubble {
+        position: fixed;
+        transform: translate(-50%, -100%);
+        z-index: 99999;
+        display: flex; align-items: center; gap: 10px;
+        background: var(--ttv-bg-elev2);
+        color: var(--ttv-fg);
+        border: 2px solid var(--ttv-border);
+        border-radius: 10px;
+        padding: 11px 18px;
+        font-size: 18px; font-weight: 700; line-height: 1;
+        box-shadow: 0 6px 22px rgba(0,0,0,0.55);
+        pointer-events: none;
+        white-space: nowrap;
+        opacity: 0;
+        transition: opacity 140ms;
+      }
+      /* Downward arrow pointing at the held tab. */
+      .ttvtab-markbubble::after {
+        content: '';
+        position: absolute; top: 100%; left: 50%;
+        transform: translateX(-50%);
+        border: 9px solid transparent;
+        border-top-color: var(--mb-edge, var(--ttv-border));
+      }
+      .ttvtab-markbubble .mb-dot {
+        width: 15px; height: 15px; border-radius: 50%;
+        display: inline-block; flex: none;
+      }
+      .ttvtab-markbubble .mb-dot.mb-none {
+        background: transparent;
+        border: 1.5px solid var(--ttv-muted);
+      }
+      /* Pin mode: every content tab becomes a pin/unpin target — a
+         dashed accent outline signals the changed tap meaning. */
+      .ttv-pinmode .ttvtab-content .ttvtab,
+      .ttv-pinmode .ttvtab-recentrow .ttvtab,
+      /* Label mode: tabs become rename targets — same dashed-outline cue. */
+      .ttv-labelmode .ttvtab-content .ttvtab,
+      .ttv-labelmode .ttvtab-recentrow .ttvtab {
+        outline: 1px dashed var(--ttv-rail-accent, var(--ttv-accent));
+        outline-offset: -1px;
+      }
+      /* ---- custom tag (second line under the name, tmux-web style) ---- */
+      /* A tagged tab switches to a vertical stack (name over tag). The
+         box height stays the FIXED 28px (.ttvtab height) — line-heights
+         are shrunk so both rows fit, like tmux-web keeps its tabs uniform
+         height. Untagged tabs are untouched (single centered line). */
+      .ttvtab.has-tag {
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: center;
+        gap: 0;
+      }
+      .ttvtab.has-tag .ttvtab-label {
+        font-size: 11px;
+        /* line-height must clear glyph ascent+descent (≈1.2em) or the
+           row's overflow clips the bottom — 11px needs ≈13.2, 9px needs
+           ≈10.8. 14 + 11 = 25px fits the 26px inner box (28px − 2px
+           border) with both lines clearing their glyphs. */
+        line-height: 14px;
+        text-align: center;
+        width: 100%;
+      }
+      .ttvtab .ttvtab-tag {
+        font-size: 9px;
+        line-height: 11px;
+        color: var(--ttv-muted);
+        text-align: center;
+        width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+      .ttvtab.active .ttvtab-tag { color: var(--ttv-accent); opacity: 0.85; }
+      .ttvtab.missing .ttvtab-tag { color: var(--ttv-muted); }
+      /* Inline tag editor (label mode). The editing tab breaks out of the
+         fit-grid to a comfortable width; the name stays on top, the input
+         replaces the tag line below it. */
+      .ttvtab.tag-editing {
+        flex: 0 0 auto;
+        min-width: 150px;
+        outline: 1px solid var(--ttv-accent);
+        outline-offset: -1px;
+      }
+      .ttvtab .ttvtab-tagedit {
+        flex: none;
+        width: 100%;
+        min-width: 0;
+        background: var(--ttv-bg);
+        color: var(--ttv-fg);
+        border: none;
+        border-radius: 3px;
+        font: inherit;
+        /* match the tag line (9/11) so name + input fit the 26px box */
+        font-size: 9px;
+        line-height: 11px;
+        text-align: center;
+        padding: 0;
+        margin: 0;
+        outline: none;
+      }
       .ttvtab .ttvtab-label {
         overflow: hidden;
         min-width: 0;
@@ -386,6 +678,28 @@
       .ttvtab.editing .ttvtab-x { opacity: 0.7; }
       .ttvtab.editing { animation: ttvtab-pulse 0.6s infinite alternate; }
       @keyframes ttvtab-pulse { from { background: var(--ttv-bg-elev2); } to { background: var(--ttv-border); } }
+      /* ---- Tall two-line tabs (opt-in: body.ttv-tall-tabs) ----------
+         When enabled (mobile-cc sets the class), every tab (pinned
+         content AND the recent row) grows to a fixed taller height so the
+         custom tag (subtitle) is readable on its own line instead of
+         being crammed into 28px. The icon rail (.ttvtab-railbtn) is
+         excluded — it stays compact. The default (no class) is the
+         original 28px cram, so ttyview-demo / panel / other embedders are
+         unaffected. */
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) { height: 44px; padding: 0 8px; }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-label {
+        font-size: 13px; line-height: 16px;
+      }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn).has-tag { gap: 2px; }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn).has-tag .ttvtab-label {
+        font-size: 13px; line-height: 15px; font-weight: 600;
+      }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-tag {
+        font-size: 11px; line-height: 14px;
+      }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-tagedit {
+        font-size: 12px; line-height: 16px;
+      }
       .ttvtab-add {
         background: transparent;
         border: 1px dashed var(--ttv-border);
@@ -462,7 +776,7 @@
         display: flex; align-items: center; gap: 6px;
         /* Same height as tabs: a header is a primary tap target
            (collapse/expand + long-press reorder), not a caption. */
-        height: 28px;
+        height: var(--ttv-tab-h, 28px);
         box-sizing: border-box;
         /* A filled full-width bar, not a transparent caption — reads
            as a real control on the black slot background. render()
@@ -576,13 +890,30 @@
                          // always-on recent row; cached from renders where
                          // it's present so the modes where it's absent
                          // (all / recent) can reserve the same space.
+  // Public API for mobile-cc's ⋮ tab menu: get/set a tab's subtitle (the
+  // per-session custom tag) and re-render so it shows immediately. Generic
+  // — callers feature-detect window.ttvTabsSetLabel; default builds without
+  // this consumer are unaffected. setLabel/labelOf/render are hoisted.
+  try {
+    window.ttvTabsGetLabel = function (session) { return labelOf(session); };
+    window.ttvTabsSetLabel = function (session, text) { setLabel(session, text); render(); };
+  } catch (_) {}
+
   function render() {
     if (!mountedSlot) return;
+    if (editingActive) return;   // don't blow away an open inline label editor
     const gen = ++renderGen;
     // Re-renders happen mid-interaction (pin/unpin, collapse,
     // panes-updated) — keep the user's scroll position instead of
-    // jumping to the top.
+    // jumping to the top. contentEl carries the groups' VERTICAL scroll;
+    // the recent row carries its own HORIZONTAL scroll (it's a fresh
+    // element each render, so without this it snaps back to the start on
+    // every dot-poll / output event — see buildRecentRow).
     const prevScroll = contentEl ? contentEl.scrollTop : 0;
+    const prevRecentScroll = (function() {
+      const rr = mountedSlot.querySelector('.ttvtab-recentrow');
+      return rr ? rr.scrollLeft : 0;
+    })();
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
     const active = tv.getActivePane();
@@ -608,6 +939,9 @@
     // context (see .ttv-stacked-slot) so width:100% works and the
     // quickkeys sibling keeps its own horizontal scroll.
     mountedSlot.style.cssText = 'display:flex;flex-direction:row;gap:4px;width:100%;align-items:stretch;';
+    mountedSlot.style.setProperty('--ttv-tab-h', tabHeight() + 'px');   // user-set tab height (cascades to tabs + headers + rail)
+    mountedSlot.classList.toggle('ttv-pinmode', pinMode);
+    mountedSlot.classList.toggle('ttv-labelmode', labelMode);
     const parent = mountedSlot.parentNode;
     if (parent) {
       parent.classList.add('ttv-stacked-slot');
@@ -880,6 +1214,9 @@
       const contentBase = rows * h + (rows - 1) * 4;
       const rr = leftCol.querySelector('.ttvtab-recentrow');
       if (rr) recentReserve = rr.offsetHeight + 4 /* leftCol row gap */;
+      // Restore the recent row's horizontal scroll (it's rebuilt every
+      // render) so a poll/output-driven re-render doesn't snap it back.
+      if (rr && prevRecentScroll) rr.scrollLeft = prevRecentScroll;
       const reserve = recentsActive ? (recentReserve || (h + 10)) : 0;
       const px = (contentBase + reserve) + 'px';
       lastHeightPx = px;
@@ -921,6 +1258,23 @@
     el.textContent = fullText.slice(0, first) + '…' + fullText.slice(n - last);
   }
 
+  // Append the custom TAG line (a smaller second row under the name,
+  // tmux-web "subtitle" style) when this session has one set. The tab's
+  // height is unchanged — `.has-tag` switches the box to a column layout
+  // with shrunk line-heights so name + tag both fit the fixed 28px. The
+  // tag is purely cosmetic; the name line (and grouping/pins/dots) are
+  // untouched. Call BEFORE appending the status dot so the dot overlays
+  // the corner rather than flowing into the stack.
+  function addTagLine(btn, session) {
+    const tag = labelOf(session);
+    if (!tag) return;
+    btn.classList.add('has-tag');
+    const el = document.createElement('span');
+    el.className = 'ttvtab-tag';
+    el.textContent = tag;
+    btn.appendChild(el);
+  }
+
   // labelText: display label (group-stripped, e.g. "1"); the tab's
   // title always carries the full session name so identity is never
   // ambiguous.
@@ -929,22 +1283,27 @@
     btn.type = 'button';
     btn.className = 'ttvtab';
     if (fitMode) btn.classList.add('fit');
-    if (editingId === pin.id) btn.classList.add('editing');
     if (!resolved) btn.classList.add('missing');
     else if (active && resolved.id === active.id) btn.classList.add('active');
+    const session = pin.session || (resolved && resolved.session);
+    const mk = markOf(session);
+    if (mk) btn.classList.add('mark-' + mk);
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
+    // The name line is the group-stripped labelText (e.g. "16"), or the
+    // full session name when ungrouped. The custom TAG is a separate
+    // second line (addTagLine), never a replacement. title= always
+    // carries the real session name.
     const fullText = labelText || pin.session || pin.id || '?';
     label.textContent = fullText;
     btn.title = pin.session || pin.id || '?';
     btn.appendChild(label);
-    const xs = document.createElement('span');
-    xs.className = 'ttvtab-x';
-    xs.textContent = '×';
-    btn.appendChild(xs);
-    const dot = sessionDot(pin.session || (resolved && resolved.session));
+    addTagLine(btn, session);
+    const dot = sessionDot(session);
     if (dot) btn.appendChild(makeDotEl(dot));
-    attachTapHandlers(btn, pin, resolved);
+    attachTabGesture(btn, session, resolved && resolved.id, function() {
+      if (resolved) tv.selectPane(resolved.id);
+    });
     return { el: btn, label, fullText };
   }
 
@@ -982,6 +1341,12 @@
     recent: '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" '
       + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
       + '<circle cx="9" cy="9" r="6.5"/><path d="M9 5.2V9l2.6 1.7"/></svg>',
+    pin: '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M6.3 2.5h5.4M10.4 2.5l-.7 5 2.2 2.4H6.1l2.2-2.4-.7-5"/><path d="M9 9.9V15.5"/></svg>',
+    label: '<svg viewBox="0 0 18 18" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" '
+      + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M11.4 3.1l3.5 3.5M12.6 1.9a1.65 1.65 0 0 1 2.3 2.3L5.5 13.6l-3.2.9.9-3.2z"/></svg>',
   };
 
   // Utility rail — mode buttons on the thumb-side edge. Each button
@@ -993,6 +1358,59 @@
       mode === 'all' ? 'Back to pinned tabs' : 'Show all sessions'));
     railEl.appendChild(makeRailButton('recent', 'recent', mode,
       mode === 'recent' ? 'Back to pinned tabs' : 'Show recent sessions (most recent first)'));
+    railEl.appendChild(makePinModeButton());
+    railEl.appendChild(makeLabelModeButton());
+  }
+
+  // Pin-mode toggle — orthogonal to the all/recent view modes: it
+  // overlays whatever view is active, turning every tab tap into a
+  // pin/unpin. Lit while on; tap again (or tap empty slot area) to exit.
+  function makePinModeButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttvtab ttvtab-railbtn';
+    if (pinMode) btn.classList.add('active');
+    const label = document.createElement('span');
+    label.className = 'ttvtab-label';
+    label.innerHTML = RAIL_ICONS.pin || '';
+    btn.appendChild(label);
+    btn.title = pinMode ? 'Done pinning (tap tabs to pin/unpin)' : 'Pin / unpin tabs';
+    btn.setAttribute('aria-label', btn.title);
+    btn.tabIndex = -1;
+    btn.addEventListener('pointerup', function(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      pinMode = !pinMode;
+      if (pinMode) labelMode = false;   // one editing posture at a time
+      render();
+    });
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    return btn;
+  }
+
+  // Label-mode toggle — sibling of pin mode: overlays whatever view is
+  // active, turning every tab tap into an inline label edit. Lit while
+  // on; tap again (or tap empty slot area) to exit. Mutually exclusive
+  // with pin mode.
+  function makeLabelModeButton() {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ttvtab ttvtab-railbtn';
+    if (labelMode) btn.classList.add('active');
+    const label = document.createElement('span');
+    label.className = 'ttvtab-label';
+    label.innerHTML = RAIL_ICONS.label || '';
+    btn.appendChild(label);
+    btn.title = labelMode ? 'Done tagging (tap a tab to edit its tag)' : 'Edit tab tags';
+    btn.setAttribute('aria-label', btn.title);
+    btn.tabIndex = -1;
+    btn.addEventListener('pointerup', function(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      labelMode = !labelMode;
+      if (labelMode) pinMode = false;   // one editing posture at a time
+      render();
+    });
+    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    return btn;
   }
   function makeRailButton(icon, targetMode, mode, title) {
     const btn = document.createElement('button');
@@ -1060,92 +1478,181 @@
     if (active && active.session === pane.session) btn.classList.add('active');
     const label = document.createElement('span');
     label.className = 'ttvtab-label';
+    // Name line is the real session name; the custom TAG (if any) is a
+    // separate second line (addTagLine), never a replacement.
     const fullText = pane.session || pane.id || '?';
     label.textContent = fullText;
     btn.appendChild(label);
     const isPinned = !!pins.find(p => p.session === pane.session);
-    if (isPinned && !(opts && opts.noPinMark)) {
+    // Suppress the 📌 pin mark when a tag is shown — in the two-line
+    // column layout it would land on its own row between name and tag.
+    if (isPinned && !(opts && opts.noPinMark) && !labelOf(pane.session)) {
       const mark = document.createElement('span');
       mark.className = 'ttvtab-pinmark';
       mark.textContent = '📌';
       btn.appendChild(mark);
     }
-    btn.title = fullText + (isPinned ? ' (pinned — long-press to unpin)' : ' (long-press to pin)');
+    btn.title = fullText + (pinMode
+      ? (isPinned ? ' (tap to unpin)' : ' (tap to pin)')
+      : ' (press & hold to mark todo/done)');
+    const mk = markOf(pane.session);
+    if (mk) btn.classList.add('mark-' + mk);
+    addTagLine(btn, pane.session);
     const dot = sessionDot(pane.session);
     if (dot) btn.appendChild(makeDotEl(dot));
-    btn.tabIndex = -1;
 
-    let pressTimer = null;
-    let longPressed = false;
-    function clearTimer() {
-      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-    }
-    btn.addEventListener('pointerdown', function() {
-      longPressed = false;
-      clearTimer();
-      pressTimer = setTimeout(function() {
-        longPressed = true;
-        if (isPinned) {
-          pins = pins.filter(p => p.session !== pane.session);
-        } else {
-          pins.push({ id: pane.id, session: pane.session });
-        }
-        savePins();
-        render();
-      }, LONG_PRESS_MS);
-    });
-    btn.addEventListener('pointerup', function(e) {
-      clearTimer();
-      if (longPressed) { longPressed = false; return; }
-      if (e.button !== undefined && e.button !== 0) return;
+    attachTabGesture(btn, pane.session, pane.id, function() {
       // Keep the user's actual pane when it's already in this session.
       tv.selectPane(active && active.session === pane.session ? active.id : pane.id);
     });
-    btn.addEventListener('pointerleave',  function() { clearTimer(); longPressed = false; });
-    btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
-    btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
     return { el: btn, label, fullText };
   }
 
-  function attachTapHandlers(btn, pin, resolved) {
-    let pressTimer = null;
-    let longPressed = false;
-    const pinKey = pin.id || pin.session;
-    function diag(ev, extra) {
+  // Inline TAG editor (label mode). Keeps the name line on top and puts
+  // a text input where the tag (second line) goes, prefilled with the
+  // current tag. Enter / blur commits; Escape cancels; an empty value
+  // CLEARS the tag. Stays in label mode so several tabs can be tagged in
+  // a row. The input stops its own pointer/click events from bubbling so
+  // the tab gesture and slot scroll don't hijack typing.
+  function startInlineEdit(btn, session) {
+    if (btn.querySelector('.ttvtab-tagedit')) return;   // already editing this tab
+    const labelEl = btn.querySelector('.ttvtab-label');
+    if (!labelEl) return;
+    editingActive = true;   // freeze background re-renders until commit/cancel
+    // Switch to the two-line stack (name on top, input below) and drop
+    // any existing static tag span so the input takes its place.
+    btn.classList.add('has-tag', 'tag-editing');
+    const oldTag = btn.querySelector('.ttvtab-tag');
+    if (oldTag) oldTag.remove();
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'ttvtab-tagedit';
+    input.value = labelOf(session) || '';
+    input.placeholder = 'tag…';
+    input.setAttribute('aria-label', 'Tag for ' + session);
+    input.autocapitalize = 'off';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    // Tag line sits after the name; the status dot is corner-absolute so
+    // appending at the end keeps name → input order.
+    const dotEl = btn.querySelector('.ttvtab-dot');
+    if (dotEl) btn.insertBefore(input, dotEl); else btn.appendChild(input);
+    ['pointerdown', 'pointerup', 'click', 'mousedown'].forEach(function(t) {
+      input.addEventListener(t, function(e) { e.stopPropagation(); });
+    });
+    let done = false;
+    function commit(save) {
+      if (done) return;
+      done = true;
+      editingActive = false;   // unfreeze BEFORE render() so it actually repaints
+      if (save) setLabel(session, input.value.trim());   // empty → clears the tag
+      render();   // rebuilds the slot; the (possibly stale) input is discarded
+    }
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+    });
+    input.addEventListener('blur', function() { commit(true); });
+    // Focus + select once it's in the DOM (mobile keyboards need this
+    // after attach, not synchronously).
+    requestAnimationFrame(function() { input.focus(); input.select(); });
+  }
+
+  // Tap + staged todo/done hold gesture (tmux-web "cycle" model). A
+  // short tap switches pane (or pins, in pin mode). Holding past
+  // markDelay() runs stage 1; keep holding another markDelay() to
+  // promote to stage 2 — one continuous press:
+  //   from none → todo (pink) → done (green)
+  //   from todo → none        → done (green)
+  //   from done → none        → todo (pink)
+  // Captured `before` (mark at press start) drives both stages so the
+  // sequence is deterministic regardless of timing jitter.
+  function attachTabGesture(btn, session, paneId, onTap) {
+    if (session) btn.dataset.session = session;
+    let t1 = null, t2 = null, acted = false, startX = 0, startY = 0;
+    let tDown = 0;   // performance.now() at pointerdown — timing baseline
+    function now() { try { return performance.now(); } catch (_) { return 0; } }
+    // Gesture telemetry → diag.jsonl (cat 'mark-gesture'). Each record
+    // carries `sinceDown` so we can see whether a stage fired late: if a
+    // stage's sinceDown ≫ its scheduled delay, the setTimeout was
+    // throttled (main thread busy rendering CC output) — that's the
+    // "sometimes a delay" smell, distinct from a drift-cancel.
+    function gd(phase, extra) {
       if (typeof window.ttvDiag !== 'function') return;
-      window.ttvDiag('tab-tap', Object.assign({ ev: ev, pin: pinKey, resolved: !!resolved }, extra || {}));
+      window.ttvDiag('mark-gesture', Object.assign(
+        { phase: phase, session: session, sinceDown: Math.round(now() - tDown) }, extra || {}));
     }
-    function clearTimer() {
-      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    function clearTimers() {
+      if (t1) { clearTimeout(t1); t1 = null; }
+      if (t2) { clearTimeout(t2); t2 = null; }
     }
-    function startPress(e) {
-      longPressed = false;
-      clearTimer();
-      diag('start', { ptr: e.pointerType });
-      pressTimer = setTimeout(function() {
-        longPressed = true;
-        editingId = pinKey;
-        diag('long-press');
-        render();
-      }, LONG_PRESS_MS);
+    function haptic() { try { if (navigator.vibrate) navigator.vibrate(35); } catch (_) {} }
+    function endQuiet() {
+      clearTimers(); hideMarkBubble();
+      if (acted) { acted = false; const r0 = now(); render(); gd('end-render', { renderMs: Math.round(now() - r0) }); }
     }
-    function endPress(e) {
-      clearTimer();
-      if (longPressed) { longPressed = false; return; }
-      if (editingId === pinKey) {
-        pins = pins.filter(p => (p.id || p.session) !== pinKey);
-        editingId = null;
-        savePins();
-        render();
-        return;
+    btn.addEventListener('pointerdown', function(e) {
+      acted = false;
+      startX = e.clientX; startY = e.clientY;
+      tDown = now();
+      clearTimers();
+      // Pin mode owns the tap (pin/unpin); don't also arm marking.
+      if (!marksOn() || !session || pinMode || labelMode) return;
+      const delay = markDelay();
+      const before = marks[session] || '';
+      gd('down', { delay: delay, before: before || null });
+      t1 = setTimeout(function() {
+        t1 = null;
+        acted = true;
+        const s1 = before ? '' : 'todo';   // had a color → clear; else pink
+        const w0 = now();
+        setMark(session, s1);
+        applyStripe(btn, s1);
+        showMarkBubble(btn, s1);
+        haptic();
+        gd('stage1', { mark: s1 || null, delay: delay, lateMs: Math.round((now() - tDown) - delay), workMs: Math.round(now() - w0) });
+        t2 = setTimeout(function() {
+          t2 = null;
+          const s2 = (before === 'done') ? 'todo' : 'done';   // promote
+          const w1 = now();
+          setMark(session, s2);
+          applyStripe(btn, s2);
+          showMarkBubble(btn, s2);
+          haptic();
+          gd('stage2', { mark: s2 || null, delay: delay, lateMs: Math.round((now() - tDown) - 2 * delay), workMs: Math.round(now() - w1) });
+        }, delay);
+      }, delay);
+    });
+    btn.addEventListener('pointermove', function(e) {
+      if (!(t1 || t2)) return;
+      // Cancel only when the finger LEAVES the tab (+ a margin), not on
+      // in-tab jitter. Distance-from-origin drift was too twitchy: a small
+      // move at the start of a hold on a wide tab exceeded MARK_DRIFT_PX
+      // while still on the tab, killing the gesture. pointerleave is
+      // unreliable for touch (implicit pointer capture keeps the target),
+      // so we test the pointer against the tab's own rect here. A real
+      // scroll moves the finger off the tab and still cancels.
+      const r = btn.getBoundingClientRect();
+      const m = MARK_DRIFT_PX;
+      const inside = e.clientX >= r.left - m && e.clientX <= r.right + m &&
+                     e.clientY >= r.top - m && e.clientY <= r.bottom + m;
+      if (!inside) {
+        gd('drift-cancel', { dx: Math.round(e.clientX - startX), dy: Math.round(e.clientY - startY) });
+        endQuiet();   // left the tab → scroll/drift cancels (keeps any applied stage)
       }
-      if (editingId) { editingId = null; render(); return; }
-      if (resolved) tv.selectPane(resolved.id);
-    }
-    btn.addEventListener('pointerdown',  function(e) { startPress(e); });
-    btn.addEventListener('pointerup',    function(e) { endPress(e); });
-    btn.addEventListener('pointerleave', function() { clearTimer(); longPressed = false; });
-    btn.addEventListener('pointercancel', function() { clearTimer(); longPressed = false; });
+    });
+    btn.addEventListener('pointerup', function(e) {
+      clearTimers();
+      hideMarkBubble();
+      if (acted) { acted = false; const r0 = now(); render(); gd('up-render', { renderMs: Math.round(now() - r0) }); return; }   // a mark fired → sync duplicates, not a tap
+      if (e.button !== undefined && e.button !== 0) return;
+      gd('tap', {});
+      if (labelMode) { if (session) startInlineEdit(btn, session); return; }
+      if (pinMode) { togglePin(session, paneId); return; }
+      if (onTap) onTap();
+    });
+    btn.addEventListener('pointerleave',  endQuiet);
+    btn.addEventListener('pointercancel', endQuiet);
     btn.addEventListener('mousedown', function(e) { e.preventDefault(); });
     btn.tabIndex = -1;
   }
@@ -1165,9 +1672,12 @@
       const off1 = tv.on('pane-changed',  render);
       const off2 = tv.on('panes-updated', render);
 
+      // Tapping empty area of the tab slot (not a tab, not the rail)
+      // exits pin / label mode — the natural "I'm done editing" gesture.
       slot.addEventListener('click', function(e) {
-        if (!e.target.closest('.ttvtab') && editingId !== null) {
-          editingId = null;
+        if ((pinMode || labelMode) && !e.target.closest('.ttvtab')) {
+          pinMode = false;
+          labelMode = false;
           render();
         }
       });
@@ -1197,6 +1707,7 @@
       render();
       return function unmount() {
         off1(); off2();
+        editingActive = false;   // never carry a frozen-render flag across mounts
         clearInterval(dotPollTimer);
         dotPollTimer = null;
         document.removeEventListener('click', onDocClick);
@@ -1313,7 +1824,7 @@
       container.appendChild(rR);
 
       // Rows
-      const r2 = makeRow('Number of rows', 'Visible height of the tab area, in tab-rows (needs Max tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
+      const r2 = makeRow('Number of rows', 'Visible height of the tab area, in tab-rows (needs Tabs per row > 0). Fewer tabs still reserve this height; more tabs scroll vertically within it.');
       const rowsInp = document.createElement('input');
       rowsInp.type = 'number'; rowsInp.min = '1'; rowsInp.max = '5';
       rowsInp.value = String(settings.rows);
@@ -1344,8 +1855,92 @@
       rD.appendChild(dotsLbl);
       container.appendChild(rD);
 
+      // Manual todo/done marks
+      const rM = makeRow('Todo / done marks', 'Press and hold any tab to mark it (tmux-web style): hold one step to set/clear, keep holding to advance — none → todo (pink) → done (green). Release to lock. Shown as a stripe on the tab’s left edge, synced across your devices. (Pin / unpin now lives on the pushpin button on the rail.)');
+      const mkLbl = document.createElement('label');
+      mkLbl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);cursor:pointer;';
+      const mkChk = document.createElement('input');
+      mkChk.type = 'checkbox';
+      mkChk.checked = settings.marks !== false;
+      mkChk.addEventListener('change', function() {
+        settings.marks = mkChk.checked;
+        saveSettings();
+        render();
+      });
+      mkLbl.appendChild(mkChk);
+      mkLbl.appendChild(document.createTextNode('Enable todo / done marks'));
+      rM.appendChild(mkLbl);
+      const clearMarks = btn('Clear all marks');
+      clearMarks.style.marginLeft = '10px';
+      clearMarks.addEventListener('click', function() {
+        const n = Object.keys(marks).length;
+        if (!n) return;
+        if (!confirm('Clear all ' + n + ' mark' + (n === 1 ? '' : 's') + '?')) return;
+        marks = {};
+        saveMarks();
+        render();
+      });
+      rM.appendChild(clearMarks);
+      // Hold time per stage (governs both the initial press and the
+      // promote-to-next interval), mirroring tmux-web's single knob.
+      const delayWrap = document.createElement('div');
+      delayWrap.style.cssText = 'margin-top:10px;display:flex;align-items:center;gap:8px;';
+      const delayLbl = document.createElement('span');
+      delayLbl.style.cssText = 'font-size:12px;color:var(--ttv-muted);';
+      delayLbl.textContent = 'Hold time per step (ms)';
+      const delayInp = document.createElement('input');
+      delayInp.type = 'number'; delayInp.min = '150'; delayInp.max = '2000'; delayInp.step = '50';
+      delayInp.value = String(markDelay());
+      delayInp.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:4px;font:inherit;font-size:14px;padding:6px 10px;width:90px;';
+      delayInp.addEventListener('change', function() {
+        const n = Math.max(150, Math.min(2000, parseInt(delayInp.value, 10) || 500));
+        settings.markDelay = n; delayInp.value = String(n);
+        saveSettings();
+      });
+      delayWrap.appendChild(delayLbl);
+      delayWrap.appendChild(delayInp);
+      rM.appendChild(delayWrap);
+      // Mark popup — a floating state indicator above the tab while you
+      // hold (your finger covers the stripe). On by default.
+      const popWrap = document.createElement('div');
+      popWrap.style.cssText = 'margin-top:10px;';
+      const popLbl = document.createElement('label');
+      popLbl.style.cssText = 'display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);cursor:pointer;';
+      const popChk = document.createElement('input');
+      popChk.type = 'checkbox';
+      popChk.checked = settings.markPopup !== false;
+      popChk.addEventListener('change', function() {
+        settings.markPopup = popChk.checked;
+        saveSettings();
+      });
+      popLbl.appendChild(popChk);
+      popLbl.appendChild(document.createTextNode('Show state popup above tab while holding'));
+      popWrap.appendChild(popLbl);
+      rM.appendChild(popWrap);
+      container.appendChild(rM);
+
+      // Custom tab labels (cosmetic alias)
+      const rL = makeRow('Tab tags', 'Tap the ✎ button on the rail to enter tag mode, then tap a tab to add a small note shown on a second line under the tab name (tmux-web style). Tags are cosmetic — the real tmux session keeps its name, so grouping and pins are unaffected. Clear a tag by emptying the field. Synced across your devices.');
+      const labelCount = btn('Clear all tags');
+      labelCount.addEventListener('click', function() {
+        const n = Object.keys(labels).length;
+        if (!n) return;
+        if (!confirm('Clear all ' + n + ' tag' + (n === 1 ? '' : 's') + '?')) return;
+        labels = {};
+        saveLabels();
+        render();
+        labelStatus.textContent = 'Cleared.';
+      });
+      rL.appendChild(labelCount);
+      const labelStatus = document.createElement('div');
+      labelStatus.style.cssText = 'color:var(--ttv-muted);font-size:11px;margin-top:6px;';
+      const ln = Object.keys(labels).length;
+      labelStatus.textContent = ln + ' tag' + (ln === 1 ? '' : 's') + ' set.';
+      rL.appendChild(labelStatus);
+      container.appendChild(rL);
+
       // Max per row
-      const r3 = makeRow('Max tabs per row', 'When > 0, each row holds exactly this many tabs distributed equally with no horizontal overflow; long names truncate with middle-ellipsis (start…end). 0 = unlimited, single horizontal scroll.');
+      const r3 = makeRow('Tabs per row', 'How many tabs each row holds, distributed equally with no horizontal overflow; long names truncate with middle-ellipsis (start…end). 0 = unlimited (single horizontal scroll per row).');
       const maxInp = document.createElement('input');
       maxInp.type = 'number'; maxInp.min = '0'; maxInp.max = '50';
       maxInp.value = String(settings.maxPerRow);
@@ -1357,6 +1952,20 @@
       });
       r3.appendChild(maxInp);
       container.appendChild(r3);
+
+      // Tab height
+      const r4 = makeRow('Tab height (px)', 'Height of each tab, group header, and rail button. 28 is the default; 20–72 allowed. Bigger = easier touch targets (more vertical space used); smaller = more tabs visible at once.');
+      const hInp = document.createElement('input');
+      hInp.type = 'number'; hInp.min = '20'; hInp.max = '72'; hInp.step = '2';
+      hInp.value = String(tabHeight());
+      hInp.style.cssText = rowsInp.style.cssText;
+      hInp.addEventListener('change', function() {
+        const n = Math.max(20, Math.min(72, parseInt(hInp.value, 10) || 28));
+        settings.tabHeight = n; hInp.value = String(n);
+        saveSettings(); render();
+      });
+      r4.appendChild(hInp);
+      container.appendChild(r4);
     },
   });
 })();
