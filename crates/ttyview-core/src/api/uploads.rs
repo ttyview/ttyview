@@ -107,6 +107,12 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/uploads", post(stage_upload))
         .route("/api/uploads/:id", delete(delete_staged))
         .route("/api/uploads/send", post(send_uploads))
+        // Backstop: reject a request body larger than one image + multipart
+        // overhead before any handler runs (axum's default is 2 MiB, which
+        // these routes would otherwise have to override anyway).
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MAX_IMAGE_BYTES + 1024 * 1024,
+        ))
 }
 
 /// Spawn the staging-dir janitor. Best-effort: sweeps stale in-memory
@@ -217,7 +223,7 @@ async fn stage_upload(
     // We accept exactly one multipart field named "image". Anything else
     // is ignored (multer/JS-side may pad with metadata fields).
     let mut chosen: Option<(String, Vec<u8>)> = None;
-    while let Ok(Some(field)) = mp.next_field().await {
+    while let Ok(Some(mut field)) = mp.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name != "image" {
             continue;
@@ -226,17 +232,31 @@ async fn stage_upload(
             .file_name()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "upload.bin".into());
-        let bytes = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrResp { error: format!("multipart read: {e}") }),
-                )
-                    .into_response();
+        // Read with a hard cap enforced AS WE READ, so a multi-GB field can't
+        // be fully buffered into RAM before a post-hoc size check (which is what
+        // `field.bytes().await` would do).
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut over = false;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    if bytes.len() + chunk.len() > MAX_IMAGE_BYTES {
+                        over = true;
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrResp { error: format!("multipart read: {e}") }),
+                    )
+                        .into_response();
+                }
             }
-        };
-        if bytes.len() > MAX_IMAGE_BYTES {
+        }
+        if over {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(ErrResp {
@@ -245,7 +265,7 @@ async fn stage_upload(
             )
                 .into_response();
         }
-        chosen = Some((original, bytes.to_vec()));
+        chosen = Some((original, bytes));
         break;
     }
 

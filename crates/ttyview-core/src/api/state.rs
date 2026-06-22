@@ -166,6 +166,19 @@ async fn put_state_key(
     if !is_safe_key(&key) {
         return (StatusCode::BAD_REQUEST, "invalid key").into_response();
     }
+    // Cap the value size: state.json is rewritten in full on every PUT and the
+    // in-memory map lives for the process lifetime, so an unbounded value is a
+    // trivial disk/RAM DoS. 1 MiB is generous for UI state (pins, labels,
+    // cached search results).
+    const MAX_VALUE_BYTES: usize = 1024 * 1024;
+    let approx_len = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
+    if approx_len > MAX_VALUE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("value exceeds {MAX_VALUE_BYTES} bytes"),
+        )
+            .into_response();
+    }
     match app.state.set(key.clone(), value) {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => {

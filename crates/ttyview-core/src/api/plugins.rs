@@ -111,6 +111,57 @@ async fn write_installed_index(config_dir: &std::path::Path, idx: &InstalledInde
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+/// A plugin's on-disk source must be a bare `<name>.js` filename living
+/// directly under the plugins dir — never a path. The charset check forbids
+/// `/` and `\`, so a crafted/compromised registry id (e.g. `../../evil`) or a
+/// tampered installed.json cannot escape the plugins dir via `dir.join(source)`
+/// on read / write / delete.
+fn is_safe_plugin_filename(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.ends_with(".js")
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Hard cap on a fetched remote registry / plugin source. A plugin is a few KB;
+/// 4 MiB is generous and bounds memory against a malicious server that streams
+/// an unbounded body into `resp.bytes()`.
+const MAX_REMOTE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Fetch a remote URL with SSRF + unbounded-body defenses: https-only (blocks
+/// `http://169.254.169.254/...` metadata and plaintext internal services), no
+/// redirects (so an https→http downgrade can't bypass the scheme check), and a
+/// hard size cap read incrementally.
+async fn fetch_remote_bounded(url: &str) -> Result<Vec<u8>, String> {
+    if !url.starts_with("https://") {
+        return Err(format!("refusing non-https plugin/registry URL: {url}"));
+    }
+    let mut resp = reqwest::Client::builder()
+        .user_agent("ttyview")
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("build client: {e}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("send {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} from {url}", resp.status()));
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body: {e}"))? {
+        if out.len() + chunk.len() > MAX_REMOTE_BYTES {
+            return Err(format!("remote body exceeds {MAX_REMOTE_BYTES} bytes: {url}"));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -153,41 +204,16 @@ async fn get_registry(State(app): State<Arc<AppState>>) -> Result<Response, Stat
 }
 
 async fn fetch_remote_json(url: &str) -> Result<Vec<u8>, String> {
-    let resp = reqwest::Client::builder()
-        .user_agent("ttyview")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("build client: {e}"))?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("send {url}: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from {url}", resp.status()));
-    }
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
+    let bytes = fetch_remote_bounded(url).await?;
     // Cheap validity check — registry must parse as the expected shape
     // before we hand it to the client. Otherwise fall back to bundle.
     serde_json::from_slice::<RegistryFile>(&bytes)
         .map_err(|e| format!("registry parse failed: {e}"))?;
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 async fn fetch_remote_text(url: &str) -> Result<Vec<u8>, String> {
-    let resp = reqwest::Client::builder()
-        .user_agent("ttyview")
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("build client: {e}"))?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| format!("send {url}: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {} from {url}", resp.status()));
-    }
-    let bytes = resp.bytes().await.map_err(|e| format!("read body: {e}"))?;
-    Ok(bytes.to_vec())
+    fetch_remote_bounded(url).await
 }
 
 /// Serve a bundled OR remote plugin's JS source. The :id corresponds
@@ -276,6 +302,11 @@ async fn get_installed_source(
     // entry; we never serve arbitrary files from plugins_dir().
     let idx = read_installed_index(&app.config_dir).await;
     let entry = idx.plugins.iter().find(|p| p.id == id).ok_or(StatusCode::NOT_FOUND)?;
+    // Defense-in-depth: never join an unvalidated on-disk filename (a tampered
+    // installed.json could carry `../../secret`).
+    if !is_safe_plugin_filename(&entry.source) {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let path = plugins_dir_for(&app.config_dir).join(&entry.source);
     let bytes = fs::read(&path).await.map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Response::builder()
@@ -366,6 +397,9 @@ async fn install_from_bundle(config_dir: &std::path::Path, id: &str) -> Result<I
         .await
         .map_err(|e| format!("create_dir_all: {e}"))?;
     let installed_filename = format!("{id}.js");
+    if !is_safe_plugin_filename(&installed_filename) {
+        return Err(format!("unsafe plugin id: {id}"));
+    }
     let path = dir.join(&installed_filename);
     fs::write(&path, asset.data.as_ref())
         .await
@@ -419,6 +453,11 @@ async fn install_inner(app: Arc<AppState>, id: &str) -> Result<InstalledPlugin, 
     // bundling detail, not part of the on-disk contract. Avoids name
     // collisions if two registry plugins shipped with the same source name.
     let installed_filename = format!("{id}.js");
+    // A compromised/crafted registry could ship an id like `../../evil` —
+    // reject anything that wouldn't be a bare `<name>.js` under plugins_dir.
+    if !is_safe_plugin_filename(&installed_filename) {
+        return Err(format!("unsafe plugin id: {id}"));
+    }
     let path = dir.join(&installed_filename);
     fs::write(&path, &bytes)
         .await
@@ -535,7 +574,37 @@ async fn uninstall_inner(config_dir: &std::path::Path, id: &str) -> Result<(), S
     write_installed_index(config_dir, &idx).await?;
     let dir = plugins_dir_for(config_dir);
     for f in to_delete {
+        // Never remove_file a path that escapes the plugins dir.
+        if !is_safe_plugin_filename(&f) {
+            continue;
+        }
         let _ = fs::remove_file(dir.join(f)).await;  // best-effort
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_plugin_filename;
+
+    #[test]
+    fn safe_plugin_filenames() {
+        // Legitimate bare <name>.js
+        assert!(is_safe_plugin_filename("ttyview-tabs.js"));
+        assert!(is_safe_plugin_filename("mobile-cc-download.js"));
+        assert!(is_safe_plugin_filename("a.js"));
+    }
+
+    #[test]
+    fn rejects_traversal_and_paths() {
+        assert!(!is_safe_plugin_filename("../../etc/passwd"));
+        assert!(!is_safe_plugin_filename("../evil.js")); // contains '/' and '..'
+        assert!(!is_safe_plugin_filename("/etc/shadow"));
+        assert!(!is_safe_plugin_filename("a/b.js")); // separator
+        assert!(!is_safe_plugin_filename("a\\b.js")); // windows separator
+        assert!(!is_safe_plugin_filename("..")); // not .js
+        assert!(!is_safe_plugin_filename("evil.sh")); // wrong ext
+        assert!(!is_safe_plugin_filename("")); // empty
+        assert!(!is_safe_plugin_filename("x..y.js")); // contains ".."
+    }
 }

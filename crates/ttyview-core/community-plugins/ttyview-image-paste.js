@@ -211,13 +211,27 @@
       // the user explicitly hitting Send while progress bars are still
       // moving is the only common case.
       flash('Waiting for uploads…');
+      // Bound the wait. A hung connection can leave an entry stuck in
+      // 'uploading' forever; without a timeout, Promise.all never resolves and
+      // Send hangs permanently (the real send was already intercepted). On
+      // timeout, abort the XHR and mark the entry failed so finalReady excludes
+      // it and the user can retry.
+      const UPLOAD_WAIT_MS = 15000;
       await Promise.all(pending.map(e => new Promise((resolve) => {
+        const started = Date.now();
         const tick = setInterval(() => {
           if (e.status !== 'preparing' && e.status !== 'uploading') {
             clearInterval(tick); resolve();
+          } else if (Date.now() - started > UPLOAD_WAIT_MS) {
+            clearInterval(tick);
+            try { if (e.xhr) e.xhr.abort(); } catch {}
+            e.status = 'error';
+            e.error = 'upload timed out';
+            resolve();
           }
         }, 100);
       })));
+      paint(paneId);
     }
     const finalReady = q.filter(e => e.status === 'done');
     if (finalReady.length === 0) {

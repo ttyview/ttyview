@@ -461,6 +461,15 @@ async fn handle_client_msg(
                     .await?;
                 return Ok(());
             }
+            // Clamp to a sane terminal range. A client (or a buggy auto-fit)
+            // sending 0 or u16::MAX would otherwise hand absurd geometry to
+            // `resize-window` and force the grid model to rebuild a Term at
+            // those dims — at 65535×65535 that's ~4.3 billion cells → OOM. 0
+            // produces a degenerate window that breaks rendering for every
+            // client on it.
+            const MAX_DIM: u16 = 1000;
+            let cols = cols.clamp(1, MAX_DIM);
+            let rows = rows.clamp(1, MAX_DIM);
             // `resize-pane` is silently a no-op when there's only one pane in
             // a window (the pane fills the window already). To actually change
             // the drawable area we resize the WINDOW that owns this pane —

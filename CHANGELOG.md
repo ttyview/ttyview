@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Public demo (sandbox + spectator) deleted.** The `ttyview-sandbox`
+  crate, `scripts/deploy-vm.sh`, and the live GCE VM + Cloud Run service
+  are gone. The sandbox handed any anonymous visitor an interactive
+  **root** shell (no isolation, no `--read-only`, no resource limits) —
+  removed at the root rather than hardened. The `--demo` synthetic-data
+  flag and `--read-only` mode remain in the daemon for local use.
+
+### Security
+
+- **Plugin endpoints**: validate the on-disk plugin filename
+  (`^[A-Za-z0-9._-]+\.js$`, no `..`/separators) before any
+  read/write/delete, closing a path-traversal via a crafted registry id
+  or tampered `installed.json`. Remote registry/plugin fetches are now
+  https-only, redirect-free, and size-capped (SSRF + unbounded-body
+  defense).
+- **Uploads**: enforce the 25 MiB image cap *as the field is read* (no
+  full-body buffering before the check) and add a request `DefaultBodyLimit`.
+- **State**: cap `PUT /api/state/:key` value size (1 MiB) — `state.json`
+  is rewritten in full per PUT.
+- **WS resize**: clamp `cols`/`rows` to 1..=1000 (was raw `u16`; 65535²
+  forced a multi-GB grid alloc, 0 wedged window geometry).
+
+### Fixed
+
+- **multi-session reconciler**: the silence-log used `try_lock().unwrap()`,
+  which panicked under lock contention and killed the reconcile task
+  permanently (no further session attach/respawn). Uses the async lock now.
+- **VTE truecolor**: `38:2:<cs>:R:G:B` (colorspace-id form) read R/G/B from
+  the wrong sub-params; the longer form is now matched first.
+- **image-paste**: a hung upload could make **Send** wait forever; the
+  in-flight wait is now bounded (15 s) and aborts/marks the stuck entry.
+
 ## [0.1.6] — 2026-06-21
 
 ### Added

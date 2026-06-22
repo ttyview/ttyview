@@ -201,10 +201,18 @@ async fn reconcile_once(
     // concurrent control-mode attaches. Remaining stuck clients are caught on
     // the next reconcile tick (RECONCILE_INTERVAL later).
     for s in stuck.into_iter().take(MAX_RESPAWNS_PER_TICK) {
-        let secs = have
-            .get(&s)
-            .map(|h| now.duration_since(*h.last_event_at.try_lock().unwrap()).as_secs())
-            .unwrap_or(0);
+        // For the log line only. Use the async lock (same as the silence scan
+        // above) rather than `try_lock().unwrap()`, which panics if the
+        // forwarder happens to be mid-write to last_event_at — a panic here
+        // kills the reconcile task permanently (its JoinHandle is never
+        // awaited), so no new sessions attach and no stuck clients respawn for
+        // the rest of the daemon's life.
+        let secs = if let Some(h) = have.get(&s) {
+            let last = *h.last_event_at.lock().await;
+            now.duration_since(last).as_secs()
+        } else {
+            0
+        };
         warn!(
             "multi-session: client for {s} silent for {secs}s, killing for respawn"
         );

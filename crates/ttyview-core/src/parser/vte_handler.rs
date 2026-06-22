@@ -305,16 +305,20 @@ where
         match p[0] {
             5 => return (Some(Color::Indexed(p[1] as u8)), 1),
             2 => {
-                if p.len() >= 4 {
+                // Check the colorspace-id form FIRST: 38:2:<cs>:R:G:B arrives
+                // as p = [2, cs, R, G, B] (len 5). If the shorter `>= 4` arm
+                // ran first it would match this too and read R/G/B from
+                // [cs, R, G] — wrong color. The plain form 38:2:R:G:B is len 4.
+                if p.len() >= 5 {
+                    // 38:2:<cs>:R:G:B (colorspace id at p[1])
                     return (
-                        Some(Color::Rgb(p[1] as u8, p[2] as u8, p[3] as u8)),
+                        Some(Color::Rgb(p[2] as u8, p[3] as u8, p[4] as u8)),
                         1,
                     );
                 }
-                if p.len() >= 5 {
-                    // 38:2::R:G:B (color space id at p[1])
+                if p.len() >= 4 {
                     return (
-                        Some(Color::Rgb(p[2] as u8, p[3] as u8, p[4] as u8)),
+                        Some(Color::Rgb(p[1] as u8, p[2] as u8, p[3] as u8)),
                         1,
                     );
                 }
