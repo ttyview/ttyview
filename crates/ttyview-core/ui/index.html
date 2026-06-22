@@ -1010,7 +1010,7 @@ window.ttyview = (function() {
       try {
         ws.send(JSON.stringify({ t: 'input', p: target, keys: converted }));
         if (typeof ttvDiag === 'function') {
-          ttvDiag('inp', { pane: target, len: converted.length, ws_state: wsState, src: 'plugin-api' });
+          ttvDiag('inp', { pane: target, len: converted.length, ws_state: wsState, src: 'plugin-api', session: (panesCache.find(p => p.id === target) || {}).session });
         }
         return true;
       } catch (e) {
@@ -1882,10 +1882,23 @@ document.addEventListener('resume', function() {
   if (document.visibilityState === 'visible') resumeResync(gap, 'resume');
 });
 
+// Per-pane compose drafts. The #input-text textarea is global, but a tab tap
+// flips the active pane synchronously — so without this, a draft typed while
+// pane A was active would be routed to pane B by a Send issued after the
+// switch (sendInput targets activePaneId at send time). Keyed by pane id.
+const paneDrafts = Object.create(null);
+
 async function selectPane(paneId) {
   if (paneId === activePaneId) return;
   const t0 = performance.now();
   const prevPaneId = activePaneId;
+  // Carry the draft with its pane: stash the outgoing pane's text, restore the
+  // incoming pane's (default empty) so the textarea matches the pane Send hits.
+  try {
+    if (prevPaneId) paneDrafts[prevPaneId] = $input.value;
+    $input.value = paneDrafts[paneId] || '';
+    autoResizeInput();
+  } catch {}
   activePaneId = paneId;
   // Plugin event: pane-changed (synchronous, before async work)
   try { window.ttyview._internal.emit('pane-changed', { from: prevPaneId, to: paneId }); } catch {}
@@ -3878,7 +3891,7 @@ function sendInput(keys) {
   const converted = keys.replace(/\n/g, '\r');
   try {
     ws.send(JSON.stringify({ t: 'input', p: activePaneId, keys: converted }));
-    ttvDiag('inp', { pane: activePaneId, len: converted.length, ws_state: wsState });
+    ttvDiag('inp', { pane: activePaneId, len: converted.length, ws_state: wsState, session: (panesCache.find(p => p.id === activePaneId) || {}).session });
     return true;
   } catch (e) {
     ttvDiag('inp-throw', { msg: String(e && e.message), pane: activePaneId, len: keys.length });
@@ -3904,6 +3917,7 @@ function submitInput() {
     return;
   }
   $input.value = '';
+  try { paneDrafts[activePaneId] = ''; } catch {}
   autoResizeInput();
 }
 
