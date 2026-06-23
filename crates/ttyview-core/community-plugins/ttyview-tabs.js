@@ -1838,7 +1838,20 @@
       gd('tap', {});
       if (labelMode) { if (session) startInlineEdit(btn, session); return; }
       if (pinMode) { togglePin(session, paneId); return; }
-      if (onTap) onTap();
+      if (onTap) {
+        // Drop stale focus before switching panes. The Message box keeps DOM
+        // focus after the soft keyboard is swiped down; a tab tap is a user
+        // gesture, so Android Chrome would re-show the keyboard for the still-
+        // focused field on every switch (no .focus() call — diag confirmed:
+        // native focusin stack + kbd-vv shrink with zero focus events between).
+        // Blurring on navigation dismisses the keyboard, the expected behavior.
+        const ae = document.activeElement;
+        if (ae && ae !== document.body && typeof ae.blur === "function" &&
+            (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT" || ae.isContentEditable)) {
+          ae.blur();
+        }
+        onTap();
+      }
     });
     btn.addEventListener('pointerleave',  endQuiet);
     btn.addEventListener('pointercancel', endQuiet);
