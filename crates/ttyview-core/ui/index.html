@@ -764,32 +764,94 @@ function __serverStateMarkHydrateFailed(why) {
     ttvDiag('state-hydrate-failed', { why: why, suppressing_puts: true });
   }
 }
+// ---- anti-clobber delta writes ---------------------------------------
+// Object-valued synced keys are pushed as a MINIMAL nested patch (only the
+// entries we actually changed since our last sync) via PATCH, so a concurrent
+// edit another client made to OTHER entries of the same key survives the
+// server-side deep-merge (fixes the marks/group-color revert + pin-wipe class
+// of bug). Arrays/scalars — and any key with no prior snapshot — fall back to
+// a whole-value PUT (unchanged behavior). __lastSynced[key] is our last-known
+// server view (seeded by hydrateServerState, updated on each write); diffing
+// against it yields exactly our own changes. Plugins keep calling
+// storage.set(wholeObject) — this is fully transparent to them.
+const __lastSynced = Object.create(null);
+function __isPlainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+function __stateDeepEqual(a, b) {
+  if (a === b) return true;
+  if (__isPlainObject(a) && __isPlainObject(b)) {
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    for (const k of ka) { if (!(k in b) || !__stateDeepEqual(a[k], b[k])) return false; }
+    return true;
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!__stateDeepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  return false;
+}
+// Minimal nested patch oldV→newV (both plain objects): recurse into nested
+// plain objects so sub-fields (e.g. a group's collapsed/color/order) merge
+// independently; arrays/scalars are atomic; removed keys map to null (the
+// server's delete sentinel). Returns null when nothing changed.
+function __statePatchDiff(oldV, newV) {
+  const patch = {};
+  for (const k of Object.keys(newV)) {
+    if (!(k in oldV)) { patch[k] = newV[k]; continue; }
+    const ov = oldV[k], nv = newV[k];
+    if (__isPlainObject(ov) && __isPlainObject(nv)) {
+      const sub = __statePatchDiff(ov, nv);
+      if (sub !== null) patch[k] = sub;
+    } else if (!__stateDeepEqual(ov, nv)) {
+      patch[k] = nv;
+    }
+  }
+  for (const k of Object.keys(oldV)) { if (!(k in newV)) patch[k] = null; }
+  return Object.keys(patch).length ? patch : null;
+}
+function __stateClone(v) { try { return JSON.parse(JSON.stringify(v)); } catch (_) { return v; } }
+function __serverStateSend(method, key, body) {
+  return fetch('/api/state/' + encodeURIComponent(key), {
+    method: method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
 function __serverStatePut(key, value) {
   if (!__serverStateShouldSync(key)) return;
   if (__serverStateWriteSuppressed) {
     if (typeof ttvDiag === 'function') ttvDiag('state-put-suppressed', { key: key });
     return;
   }
-  // Fire-and-forget; failures land in console.error + diag log.
-  // The localStorage write has already happened, so even if the
-  // server PUT fails the UI still has correct state in this
-  // browser; the next browser to hit the daemon may show stale.
-  fetch('/api/state/' + encodeURIComponent(key), {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(value),
-  }).then(function(r) {
-    if (!r.ok) {
-      console.error('[ttyview] PUT /api/state/' + key + ' → ' + r.status);
-      if (typeof ttvDiag === 'function') {
-        ttvDiag('state-put-fail', { key: key, status: r.status });
-      }
+  // Delta (PATCH) when we have a prior object snapshot; else whole PUT.
+  const snap = __lastSynced[key];
+  let method = 'PUT', body = value;
+  if (__isPlainObject(value) && __isPlainObject(snap)) {
+    const patch = __statePatchDiff(snap, value);
+    if (patch === null) { __lastSynced[key] = __stateClone(value); return; } // no-op
+    method = 'PATCH'; body = patch;
+  }
+  // Optimistically record what we're pushing (matches the prior fire-and-
+  // forget semantics: localStorage already has it; a failed push is lossy to
+  // the server but reconciles on the next good hydrate).
+  __lastSynced[key] = __stateClone(value);
+  __serverStateSend(method, key, body).then(function(r) {
+    if (r.ok) return;
+    // Back-compat: a server without the PATCH route → whole-value PUT, so a
+    // version skew never silently drops a write.
+    if (method === 'PATCH' && (r.status === 404 || r.status === 405)) {
+      return __serverStateSend('PUT', key, value).then(function(r2) {
+        if (!r2.ok && typeof ttvDiag === 'function') ttvDiag('state-put-fail', { key: key, status: r2.status, fallback: true });
+      });
     }
+    console.error('[ttyview] ' + method + ' /api/state/' + key + ' → ' + r.status);
+    if (typeof ttvDiag === 'function') ttvDiag('state-put-fail', { key: key, status: r.status, method: method });
   }).catch(function(e) {
-    console.error('[ttyview] PUT /api/state/' + key + ' threw', e);
-    if (typeof ttvDiag === 'function') {
-      ttvDiag('state-put-throw', { key: key, msg: String(e && e.message) });
-    }
+    console.error('[ttyview] ' + method + ' /api/state/' + key + ' threw', e);
+    if (typeof ttvDiag === 'function') ttvDiag('state-put-throw', { key: key, msg: String(e && e.message) });
   });
 }
 function __serverStateDelete(key) {

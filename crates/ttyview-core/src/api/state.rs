@@ -108,6 +108,48 @@ impl StateStore {
         drop(g);
         write_atomic(&self.file_path, &bytes)
     }
+
+    /// Deep-merge `patch` into `key`'s current value and persist, under the
+    /// same write lock as `set`/`unset`. This is the anti-clobber path: a
+    /// client sends only the fields it actually CHANGED (a minimal nested
+    /// patch), so concurrent edits another client made to OTHER entries of
+    /// the same key survive. `null` patch values delete that entry; arrays
+    /// and scalars replace wholesale (arrays-as-leaf). See `deep_merge`.
+    pub fn merge(&self, key: String, patch: Value) -> std::io::Result<()> {
+        let mut g = self.data.lock().unwrap();
+        let entry = g.entry(key).or_insert(Value::Null);
+        deep_merge(entry, patch);
+        let bytes = serialise(&g)?;
+        drop(g);
+        write_atomic(&self.file_path, &bytes)
+    }
+}
+
+/// Recursively merge `patch` into `target`.
+/// - both objects → per-key: `null` deletes; nested objects recurse;
+///   everything else (scalars, ARRAYS) replaces that key wholesale.
+/// - patch is a scalar/array → replaces `target` wholesale (arrays-as-leaf).
+/// - target is absent/non-object but patch is an object → target becomes a
+///   fresh object and the patch is applied (so `null` fields are skipped, not
+///   stored as nulls).
+fn deep_merge(target: &mut Value, patch: Value) {
+    if let Value::Object(p) = patch {
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        let t = target.as_object_mut().unwrap();
+        for (k, v) in p {
+            if v.is_null() {
+                t.remove(&k);
+            } else if t.get(&k).map(Value::is_object).unwrap_or(false) && v.is_object() {
+                deep_merge(t.get_mut(&k).unwrap(), v);
+            } else {
+                t.insert(k, v);
+            }
+        }
+    } else {
+        *target = patch;
+    }
 }
 
 fn serialise(data: &HashMap<String, Value>) -> std::io::Result<Vec<u8>> {
@@ -142,7 +184,12 @@ struct StoreFile {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/state", get(get_state))
-        .route("/api/state/:key", put(put_state_key).delete(delete_state_key))
+        .route(
+            "/api/state/:key",
+            put(put_state_key)
+                .patch(patch_state_key)
+                .delete(delete_state_key),
+        )
 }
 
 #[derive(Serialize)]
@@ -183,6 +230,38 @@ async fn put_state_key(
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
         Err(e) => {
             tracing::warn!(target: "ttyview::state", key = %key, "state set failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": e.to_string()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn patch_state_key(
+    State(app): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(patch): Json<Value>,
+) -> impl IntoResponse {
+    if !is_safe_key(&key) {
+        return (StatusCode::BAD_REQUEST, "invalid key").into_response();
+    }
+    // Same DoS guard as PUT — the merge rewrites state.json in full and the
+    // result lives in the in-memory map for the process lifetime.
+    const MAX_VALUE_BYTES: usize = 1024 * 1024;
+    let approx_len = serde_json::to_vec(&patch).map(|v| v.len()).unwrap_or(0);
+    if approx_len > MAX_VALUE_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("patch exceeds {MAX_VALUE_BYTES} bytes"),
+        )
+            .into_response();
+    }
+    match app.state.merge(key.clone(), patch) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response(),
+        Err(e) => {
+            tracing::warn!(target: "ttyview::state", key = %key, "state merge failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"ok": false, "error": e.to_string()})),
@@ -300,5 +379,76 @@ mod tests {
         assert!(!is_safe_key("a/b/c"));            // slash
         assert!(!is_safe_key("k\0null"));           // NUL
         assert!(!is_safe_key(&"x".repeat(257)));    // too long
+    }
+
+    // ---- deep_merge (anti-clobber) ----
+    use serde_json::json;
+    fn merged(mut target: Value, patch: Value) -> Value {
+        deep_merge(&mut target, patch);
+        target
+    }
+
+    #[test]
+    fn merge_changes_only_patched_entries() {
+        // The core anti-clobber property: a patch touching s1 must NOT drop
+        // s2 that another client set on the server meanwhile.
+        let server = json!({ "s1": "todo", "s2": "done" });
+        let patch = json!({ "s1": "done" });            // our only change
+        assert_eq!(merged(server, patch), json!({ "s1": "done", "s2": "done" }));
+    }
+
+    #[test]
+    fn merge_null_deletes_entry() {
+        let target = json!({ "a": 1, "b": 2 });
+        assert_eq!(merged(target, json!({ "b": null })), json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn merge_recurses_into_nested_objects() {
+        // groups[g] = {collapsed,color,order}: changing `color` must keep
+        // a concurrently-set `collapsed`/`order`.
+        let target = json!({ "g": { "collapsed": true, "color": "#aaa", "order": 0 } });
+        let patch = json!({ "g": { "color": "#0f0" } });
+        assert_eq!(
+            merged(target, patch),
+            json!({ "g": { "collapsed": true, "color": "#0f0", "order": 0 } })
+        );
+    }
+
+    #[test]
+    fn merge_arrays_are_atomic_leaves() {
+        // Arrays replace wholesale (no element merge) — pins-style values.
+        let target = json!({ "p": [1, 2, 3] });
+        assert_eq!(merged(target, json!({ "p": [9] })), json!({ "p": [9] }));
+    }
+
+    #[test]
+    fn merge_scalar_patch_replaces_wholesale() {
+        assert_eq!(merged(json!({ "a": 1 }), json!("x")), json!("x"));
+        assert_eq!(merged(json!([1, 2]), json!({ "a": 1 })), json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn merge_into_absent_skips_null_fields() {
+        // Fresh key (Null): nulls in the patch are skips, not stored nulls.
+        let target = Value::Null;
+        assert_eq!(merged(target, json!({ "a": 1, "gone": null })), json!({ "a": 1 }));
+    }
+
+    #[test]
+    fn store_merge_persists_and_survives_reopen() {
+        let dir = tmp_dir();
+        let key = "ttv-plugin:ttyview-tabs:marks";
+        {
+            let s = StateStore::open(dir.path()).unwrap();
+            s.set(key.into(), json!({ "s1": "todo", "s2": "done" })).unwrap();
+            // Simulate a stale client that only changed s1 — must keep s2.
+            s.merge(key.into(), json!({ "s1": "done" })).unwrap();
+        }
+        let s2 = StateStore::open(dir.path()).unwrap();
+        assert_eq!(
+            s2.snapshot().get(key).unwrap(),
+            &json!({ "s1": "done", "s2": "done" })
+        );
     }
 }
