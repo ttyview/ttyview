@@ -213,6 +213,12 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
     // clients that expect their own size to drive the pane.
     let mut held_windows: HashSet<String> = HashSet::new();
 
+    // Global /api/state mutation nudges. Independent of pane subs (a client
+    // with zero pane subs still wants these), so it's its own select branch —
+    // not part of the per-pane drain. The client refetches the full snapshot
+    // on each nudge instead of polling. (battery-trio item 3)
+    let mut change_rx = app.state.subscribe();
+
     // Two select branches: client commands AND fan-in of pane broadcasts.
     // To select over a dynamic set of receivers we do a small poll-based merge.
     // Labeled `'conn` so the inner branches can break-out-with-cleanup.
@@ -307,6 +313,25 @@ async fn handle_socket(socket: WebSocket, app: Arc<AppState>) {
                 }
                 for i in to_remove.into_iter().rev() {
                     subs.swap_remove(i);
+                }
+            }
+            changed = change_rx.recv() => {
+                match changed {
+                    // A `Lagged` just means several mutations happened while we
+                    // were busy — one nudge still tells the client to refetch
+                    // the full snapshot, so collapse it into a single message.
+                    Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if sender
+                            .send(Message::Text("{\"t\":\"state-changed\"}".to_string()))
+                            .await
+                            .is_err()
+                        {
+                            break 'conn;
+                        }
+                    }
+                    // The sender lives for the whole process; treat a close as
+                    // "no more nudges" and just stop listening on this branch.
+                    Err(broadcast::error::RecvError::Closed) => {}
                 }
             }
         }

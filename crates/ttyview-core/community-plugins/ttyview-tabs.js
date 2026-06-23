@@ -104,8 +104,7 @@
   const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row (single-row mode)
   const RECENT_STORE_MAX = 30;  // MRU entries kept in storage
   const RECENT_ROW_MAX_MULTI = RECENT_STORE_MAX;  // multi-row mode: show the full MRU (it scrolls vertically)
-  const DOT_ACTIVE_MS = 4000;  // pane output within this window = "active"
-  const DOT_POLL_MS = 4000;    // /panes refresh cadence while mounted + visible
+  const DOT_ACTIVE_MS = 4000;  // a session stays "active" this long after its last output tick
 
   const storage = tv.storage('ttyview-tabs');
 
@@ -403,7 +402,8 @@
   //   attention (orange)         — was active, went idle while you
   //               weren't viewing it; cleared when you switch to it.
   const waitingPanes = new Map();   // paneId -> session (null until resolved)
-  let activeSessions = new Set();   // sessions with recent output
+  let activeSessions = new Set();   // sessions with recent output (tick-driven)
+  const activeTimers = new Map();   // session -> decay timeout id (clears 'active' after DOT_ACTIVE_MS)
   const attention = new Set();      // finished-since-viewed sessions
   const DOT_RANK = { waiting: 3, active: 2, attention: 1 };
 
@@ -434,26 +434,25 @@
     return el;
   }
 
+  // Reconcile dot state against the current pane set. 'active' is driven by
+  // WS tick events (markActive / decayActive), NOT by idle_ms — so this only
+  // does live-set housekeeping: clear attention for the viewed session, and
+  // drop dead sessions out of every dot set. (battery-trio item 2, 2026-06-23)
   function updateDotState(panes) {
     const activePane = tv.getActivePane();
     const viewedSession = activePane ? activePane.session : null;
-    const live = new Set();
-    const nowActive = new Set();
-    for (const p of panes) {
-      live.add(p.session);
-      if (typeof p.idle_ms === 'number' && p.idle_ms < DOT_ACTIVE_MS) {
-        nowActive.add(p.session);
-      }
-    }
-    // active → idle transition while not being viewed = attention.
-    for (const s of activeSessions) {
-      if (!nowActive.has(s) && s !== viewedSession && live.has(s)) {
-        attention.add(s);
-      }
-    }
+    const live = new Set(panes.map(p => p.session));
     if (viewedSession) attention.delete(viewedSession);
     for (const s of [...attention]) if (!live.has(s)) attention.delete(s);
-    activeSessions = nowActive;
+    // A session whose panes all died can't be "active" anymore — drop it and
+    // cancel its pending decay so the timer can't resurrect a ghost dot.
+    for (const s of [...activeSessions]) {
+      if (!live.has(s)) {
+        activeSessions.delete(s);
+        const t = activeTimers.get(s);
+        if (t) { clearTimeout(t); activeTimers.delete(s); }
+      }
+    }
     // Prune waiting entries whose pane died (prompt can't resolve
     // anymore) and late-resolve sessions for panes we couldn't map
     // when the event arrived.
@@ -495,18 +494,41 @@
     render();
   });
 
-  // idle_ms only refreshes when /panes is re-fetched — poll while the
-  // tab area is mounted and the page is visible. refreshPanes emits
-  // panes-updated, which both updates dot state (above) and re-renders
-  // (tabBar's subscription).
-  let dotPollTimer = null;
-  function pollDots() {
-    if (!dotsOn() || document.visibilityState === 'hidden') return;
-    if (typeof tv.refreshPanes === 'function') tv.refreshPanes();
+  // 'active' (blue, "producing output") is driven by WS tick events for ALL
+  // panes — the core's all-panes sub now includes kinds:['semantic','tick']
+  // and its onmessage pre-filter emits a 'tick' plugin event for every pane
+  // (active + background). A session is active from a tick until DOT_ACTIVE_MS
+  // passes with no further tick. This replaces the old 4s /panes poll
+  // (refreshPanes), taking the dots' steady-state HTTP cost to zero — they now
+  // update instantly on output and cost nothing when idle. (battery-trio item 2)
+  function decayActive(session) {
+    activeTimers.delete(session);
+    if (!activeSessions.has(session)) return;
+    activeSessions.delete(session);
+    // active → idle while NOT being viewed (and still live) = attention.
+    const ap = tv.getActivePane();
+    const viewed = ap ? ap.session : null;
+    const live = new Set(tv.listPanes().map(p => p.session));
+    if (session !== viewed && live.has(session)) attention.add(session);
+    render();
   }
-  function onVisibilityPoll() {
-    if (document.visibilityState === 'visible') pollDots();
+  function markActive(session) {
+    if (!dotsOn() || !session) return;
+    const had = activeSessions.has(session);
+    activeSessions.add(session);
+    attention.delete(session);            // fresh output supersedes "finished"
+    const t = activeTimers.get(session);
+    if (t) clearTimeout(t);
+    activeTimers.set(session, setTimeout(function() { decayActive(session); }, DOT_ACTIVE_MS));
+    if (!had) render();                    // idle → active: repaint the dot now
   }
+  // The active pane also delivers tick via its full sub, so it can arrive
+  // twice — markActive is idempotent (just resets the decay), so dups are fine.
+  tv.on('tick', function(msg) {
+    if (!dotsOn() || !msg || !msg.p) return;
+    const p = tv.listPanes().find(x => x.id === msg.p);
+    if (p) markActive(p.session);
+  });
 
   // Geometry diagnostics for the "section moves on toggle" report —
   // lands in the daemon's diag.jsonl and the Client Logs tab. One
@@ -866,7 +888,7 @@
         outline: 1px solid var(--ttv-accent);
       }
       .ttvtab-ghead .ttvtab-garrow {
-        flex: none; width: 38px; height: 24px;
+        flex: none; width: 44px; height: 36px;
         background: var(--ttv-bg-elev2); color: var(--ttv-fg);
         border: 1px solid var(--ttv-border); border-radius: 4px;
         font-size: 12px; line-height: 1; font-family: inherit;
@@ -909,7 +931,7 @@
         flex: none;
       }
       .ttvtab-rail .ttvtab {
-        width: 32px; padding: 0; justify-content: center;
+        width: 44px; min-height: 44px; padding: 0; justify-content: center;
         /* Icon color = the embedder's rail accent if set (mobile-cc
            paints it brand-coral), else the host theme accent. */
         color: var(--ttv-rail-accent, var(--ttv-accent));
@@ -1861,6 +1883,9 @@
             (ae.tagName === "TEXTAREA" || ae.tagName === "INPUT" || ae.isContentEditable)) {
           ae.blur();
         }
+        // Light haptic tick confirming the tab/pane switch (mobile; no-op
+        // where navigator.vibrate is unsupported).
+        try { if (navigator.vibrate) navigator.vibrate(20); } catch (_) {}
         onTap();
       }
     });
@@ -1906,11 +1931,8 @@
       }
       document.addEventListener('click', onDocClick);
 
-      // Status-dot freshness: poll /panes while mounted + visible,
-      // and immediately on returning to the foreground (the phone
-      // resume path — intervals were clamped/frozen while hidden).
-      dotPollTimer = setInterval(pollDots, DOT_POLL_MS);
-      document.addEventListener('visibilitychange', onVisibilityPoll);
+      // Status-dot freshness is now event-driven (WS tick + semantic subs,
+      // module-scope handlers above) — no per-mount /panes poll to start.
 
       // Seed the MRU with the session you're currently in, so the
       // recent row isn't empty before your first pane switch.
@@ -1921,10 +1943,7 @@
       return function unmount() {
         off1(); off2();
         editingActive = false;   // never carry a frozen-render flag across mounts
-        clearInterval(dotPollTimer);
-        dotPollTimer = null;
         document.removeEventListener('click', onDocClick);
-        document.removeEventListener('visibilitychange', onVisibilityPoll);
         if (mountedSlot && parentTouched && mountedSlot.parentNode) {
           mountedSlot.parentNode.classList.remove('ttv-stacked-slot');
         }
@@ -2104,7 +2123,8 @@
       dotsChk.addEventListener('change', function() {
         settings.dots = dotsChk.checked;
         saveSettings();
-        if (settings.dots) pollDots();
+        // Re-enabling: dots refill from the next tick/semantic events; nothing
+        // to poll. render() now so the toggle reflects immediately.
         render();
       });
       dotsLbl.appendChild(dotsChk);

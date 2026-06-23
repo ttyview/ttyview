@@ -49,6 +49,12 @@ pub struct StateStore {
     /// Key → JSON value cache. `Value::Null` is treated as "set to
     /// null" (distinct from "absent"). Use `unset` to remove a key.
     data: Mutex<HashMap<String, Value>>,
+    /// Fires once per successful mutation (set / merge / unset). WS
+    /// connections subscribe and push a `{t:"state-changed"}` nudge so
+    /// clients refetch `/api/state` on demand instead of polling it. The
+    /// payload is intentionally empty — a nudge, not a delta; the client
+    /// already diffs the full snapshot. See `ttyview-live-sync`.
+    change_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl StateStore {
@@ -75,10 +81,26 @@ impl StateStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(e) => return Err(e),
         };
+        // Capacity is small on purpose: a subscriber that falls behind gets
+        // `Lagged`, which we coalesce into a single nudge (the client refetches
+        // the whole snapshot anyway), so we never need to buffer many.
+        let (change_tx, _) = tokio::sync::broadcast::channel(16);
         Ok(Arc::new(Self {
             file_path,
             data: Mutex::new(data),
+            change_tx,
         }))
+    }
+
+    /// Subscribe to mutation nudges. Each successful `set`/`merge`/`unset`
+    /// sends one `()`; WS connections relay it as `{t:"state-changed"}`.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.change_tx.subscribe()
+    }
+
+    /// Notify subscribers of a mutation. Send error (no receivers) is ignored.
+    fn notify(&self) {
+        let _ = self.change_tx.send(());
     }
 
     /// Snapshot the entire store. Cheap clone of a small map; values
@@ -96,7 +118,9 @@ impl StateStore {
         g.insert(key, value);
         let bytes = serialise(&g)?;
         drop(g);
-        write_atomic(&self.file_path, &bytes)
+        write_atomic(&self.file_path, &bytes)?;
+        self.notify();
+        Ok(())
     }
 
     /// Remove `key` and persist. No-op if the key wasn't present
@@ -106,7 +130,9 @@ impl StateStore {
         g.remove(key);
         let bytes = serialise(&g)?;
         drop(g);
-        write_atomic(&self.file_path, &bytes)
+        write_atomic(&self.file_path, &bytes)?;
+        self.notify();
+        Ok(())
     }
 
     /// Deep-merge `patch` into `key`'s current value and persist, under the
@@ -121,7 +147,9 @@ impl StateStore {
         deep_merge(entry, patch);
         let bytes = serialise(&g)?;
         drop(g);
-        write_atomic(&self.file_path, &bytes)
+        write_atomic(&self.file_path, &bytes)?;
+        self.notify();
+        Ok(())
     }
 }
 

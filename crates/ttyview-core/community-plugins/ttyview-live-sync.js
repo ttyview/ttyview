@@ -3,8 +3,10 @@
 //
 // Why: /api/state is server-authoritative, but until this plugin the
 // server's view only reached a browser at page load (hydrateServerState).
-// This plugin polls /api/state, diffs against the last-seen snapshot,
-// and re-applies whatever changed. Two things fall out of that:
+// This plugin refetches /api/state on a server WS nudge ('state-changed')
+// and on each (re)connect, diffs against the last-seen snapshot, and
+// re-applies whatever changed (it used to poll on a 1.5s timer — now
+// event-driven, see the wiring at the bottom). Two things fall out of that:
 //
 //   1. An agent on the host (the `ttyview-ui` CLI in scripts/, or any
 //      curl) can drive the UI — switch theme/view, rewrite the pinned
@@ -33,7 +35,6 @@
   const tv = window.ttyview;
   if (!tv || tv.apiVersion !== 1) return;
 
-  const POLL_MS = 1500;
   const QUEUE_KEY = 'ttv-agent-cmd-queue';
   const CURSOR_KEY = 'ttv-live-sync-cursor'; // per-device, NOT synced
   const STALE_TRANSIENT_MS = 60 * 1000;
@@ -214,18 +215,26 @@
     }
   }
 
-  let timer = setInterval(syncNow, POLL_MS);
+  // Event-driven (battery-trio item 3, 2026-06-23): NO periodic poll. The
+  // daemon pushes a {t:"state-changed"} WS nudge on every /api/state mutation
+  // (StateStore set/merge/unset), which the core relays as the 'state-changed'
+  // plugin event — we refetch on that. We also refetch once per (re)connect via
+  // 'connection-open' (the core emits it from ws.onopen on every reopen,
+  // including heartbeat/online reconnects), so a change made while we were
+  // disconnected is still caught. This replaces the old 1.5s GET /api/state
+  // poll, taking the steady-state HTTP cadence to zero (radio can sleep).
+  if (typeof tv.on === 'function') {
+    tv.on('state-changed', function () { syncNow(); });
+    tv.on('connection-open', function () { syncNow(); });
+  }
+  // Belt-and-suspenders: if the page was backgrounded with the socket open and
+  // somehow missed a nudge, catch up on return. Fires only on the visible
+  // transition and no-ops when nothing changed.
   document.addEventListener('visibilitychange', function () {
-    // Phones background tabs aggressively — don't burn battery
-    // polling a hidden page; catch up immediately on return.
-    if (document.hidden) {
-      clearInterval(timer);
-      timer = null;
-    } else if (!timer) {
-      syncNow();
-      timer = setInterval(syncNow, POLL_MS);
-    }
+    if (!document.hidden) syncNow();
   });
+  // Initial baseline fetch (boot hydrate already applied server state, so the
+  // first syncNow only seeds `last`; later nudges apply diffs).
   syncNow();
 
   tv.contributes.command({
