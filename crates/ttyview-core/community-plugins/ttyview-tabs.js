@@ -166,7 +166,30 @@
   let parentTouched = false;    // whether we've added .ttv-stacked-slot to parent
   let contentEl = null;         // the vertically-scrolling column left of the rail
 
-  function savePins()      { storage.set(STORAGE_KEY,  pins);      }
+  // DATA-LOSS GUARD (2026-06-23): the user's pins were wiped 20 → 1 during
+  // recents/tab churn — most likely a hydrate→render→save race re-saved a
+  // shrunken in-memory `pins` over the good set. `storage.get()` reads
+  // localStorage, which hydrateServerState() overwrites from /api/state at
+  // boot BEFORE plugins load, so at save time it still holds the
+  // last-persisted (good) pins. Refuse to overwrite a populated set with an
+  // empty or drastically-shrunken one unless the caller explicitly forces it
+  // (the "Clear all pins" action). A normal unpin (N → N-1) is never drastic,
+  // so it passes untouched. On block, restore the in-memory array from the
+  // good persisted copy so the bad set can't linger and re-save later.
+  function savePins(opts) {
+    if (!(opts && opts.force)) {
+      let stored = [];
+      try { const v = storage.get(STORAGE_KEY); if (Array.isArray(v)) stored = v; } catch (_) {}
+      const drastic = (stored.length >= 2 && pins.length === 0)
+                   || (stored.length >= 4 && pins.length < stored.length / 2);
+      if (drastic) {
+        try { if (typeof window.ttvDiag === 'function') window.ttvDiag('pins-save-blocked', { had: stored.length, tried: pins.length }); } catch (_) {}
+        pins = stored.slice();
+        return;
+      }
+    }
+    storage.set(STORAGE_KEY, pins);
+  }
   function saveSettings()  { storage.set(SETTINGS_KEY, settings);  }
   function saveGroups()    { storage.set(GROUPS_KEY,   groupsCfg); }
   function saveMarks()     { storage.set(MARKS_KEY,    marks);     }
@@ -1946,7 +1969,7 @@
       clear.addEventListener('click', function() {
         if (!confirm('Remove all ' + pins.length + ' pinned tabs?')) return;
         pins = [];
-        savePins();
+        savePins({ force: true });   // explicit user clear — bypass the shrink guard
         render();
         statusEl.textContent = 'Cleared.';
       });
