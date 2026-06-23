@@ -99,10 +99,11 @@
   // Quick taps (< this) still switch as before.
   const HOLD_SUPPRESS_MS = 250;
   const MARK_BUBBLE_LIFT = 72;   // px the state popup floats above the tab top (clear of the fingertip)
-  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, recentRows: 1, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row; recentRows 1 = single horizontal-scroll strip, >1 = wrapped grid scrolling vertically
   const RECENTS_KEY = 'recents';
-  const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row
+  const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row (single-row mode)
   const RECENT_STORE_MAX = 30;  // MRU entries kept in storage
+  const RECENT_ROW_MAX_MULTI = RECENT_STORE_MAX;  // multi-row mode: show the full MRU (it scrolls vertically)
   const DOT_ACTIVE_MS = 4000;  // pane output within this window = "active"
   const DOT_POLL_MS = 4000;    // /panes refresh cadence while mounted + visible
 
@@ -903,6 +904,16 @@
         padding: 0 0 5px 6px;
       }
       .ttvtab-recentrow::-webkit-scrollbar { display: none; }
+      /* Multi-row recents (settings.recentRows > 1): wrap into a grid that
+         scrolls VERTICALLY instead of one strip scrolling horizontally. The
+         max-height (N tab-rows) is set inline by render() once a tab is
+         measured, so it works across font-size / tab-height changes. */
+      .ttvtab-recentrow.multirow {
+        flex-wrap: wrap;
+        overflow-x: hidden;
+        overflow-y: auto;
+        row-gap: 4px;
+      }
     `;
     document.head.appendChild(st);
   }
@@ -954,7 +965,8 @@
     const prevScroll = contentEl ? contentEl.scrollTop : 0;
     const prevRecentScroll = (function() {
       const rr = mountedSlot.querySelector('.ttvtab-recentrow');
-      return rr ? rr.scrollLeft : 0;
+      if (!rr) return 0;
+      return rr.classList.contains('multirow') ? rr.scrollTop : rr.scrollLeft;
     })();
     mountedSlot.innerHTML = '';
     const panes = tv.listPanes();
@@ -1255,10 +1267,21 @@
       const h = (tab && tab.offsetHeight) ? tab.offsetHeight : 28;
       const contentBase = rows * h + (rows - 1) * 4;
       const rr = leftCol.querySelector('.ttvtab-recentrow');
+      // Multi-row recents: cap the wrapped strip at N tab-rows tall so it
+      // scrolls vertically. Set BEFORE measuring offsetHeight so the
+      // reserved height below reflects the capped (visible) height.
+      if (rr && rr.classList.contains('multirow')) {
+        const rRows = Math.max(1, settings.recentRows | 0);
+        rr.style.maxHeight = (rRows * h + (rRows - 1) * 4 + 5 /* pad-bottom */) + 'px';
+      }
       if (rr) recentReserve = rr.offsetHeight + 4 /* leftCol row gap */;
-      // Restore the recent row's horizontal scroll (it's rebuilt every
-      // render) so a poll/output-driven re-render doesn't snap it back.
-      if (rr && prevRecentScroll) rr.scrollLeft = prevRecentScroll;
+      // Restore the recent row's scroll (it's rebuilt every render) so a
+      // poll/output-driven re-render doesn't snap it back. Single-row mode
+      // scrolls horizontally; multi-row scrolls vertically.
+      if (rr && prevRecentScroll) {
+        if (rr.classList.contains('multirow')) rr.scrollTop = prevRecentScroll;
+        else rr.scrollLeft = prevRecentScroll;
+      }
       const reserve = recentsActive ? (recentReserve || (h + 10)) : 0;
       const px = (contentBase + reserve) + 'px';
       lastHeightPx = px;
@@ -1500,10 +1523,13 @@
   // scroll (more recents than fit just scroll), so tab WIDTH matches a
   // group tab while still showing the full MRU list.
   function buildRecentRow(panes, active, fitMode, max, placedTabs) {
-    const live = liveRecents(panes, true).slice(0, RECENT_ROW_MAX);
+    const recentRows = Math.max(1, settings.recentRows | 0);
+    const multiRow = recentRows > 1;
+    const cap = multiRow ? RECENT_ROW_MAX_MULTI : RECENT_ROW_MAX;
+    const live = liveRecents(panes, true).slice(0, cap);
     if (!live.length) return null;
     const row = document.createElement('div');
-    row.className = 'ttvtab-recentrow';
+    row.className = 'ttvtab-recentrow' + (multiRow ? ' multirow' : '');
     row.title = 'Recently used sessions';
     if (fitMode) row.style.setProperty('--ttv-max-per-row', String(max));
     for (const p of live) {
@@ -1881,6 +1907,23 @@
       recLbl.appendChild(recChk);
       recLbl.appendChild(document.createTextNode('Show recent tabs row'));
       rR.appendChild(recLbl);
+      // How many rows tall the recent strip is. 1 = single horizontal-scroll
+      // strip (default); >1 = the recents wrap into that many rows and the
+      // block scrolls vertically instead.
+      const recRowsLbl = document.createElement('label');
+      recRowsLbl.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);margin-top:10px;';
+      recRowsLbl.appendChild(document.createTextNode('Recent rows (1 = single scrolling strip)'));
+      const recRowsInp = document.createElement('input');
+      recRowsInp.type = 'number'; recRowsInp.min = '1'; recRowsInp.max = '6';
+      recRowsInp.value = String(Math.max(1, settings.recentRows | 0) || 1);
+      recRowsInp.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:4px;font:inherit;font-size:14px;padding:6px 10px;width:80px;';
+      recRowsInp.addEventListener('change', function() {
+        const n = Math.max(1, Math.min(6, parseInt(recRowsInp.value, 10) || 1));
+        settings.recentRows = n; recRowsInp.value = String(n);
+        saveSettings(); render();
+      });
+      recRowsLbl.appendChild(recRowsInp);
+      rR.appendChild(recRowsLbl);
       container.appendChild(rR);
 
       // Rows
