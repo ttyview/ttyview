@@ -750,8 +750,26 @@ function __serverStateShouldSync(key) {
   }
   return false;
 }
+// DATA-LOSS GUARD (2026-06-23): if hydrateServerState() fails at boot, this
+// browser's localStorage may be stale/empty — pushing it to the server would
+// clobber the good server-authoritative state (this is the residual edge
+// behind the tab-pin 20→1 wipe). When hydrate fails we SUSPEND every
+// /api/state write for the session, so localStorage-only state can never
+// overwrite the server. Local UI still works (localStorage writes proceed);
+// the next successful load re-hydrates from the server.
+let __serverStateWriteSuppressed = false;
+function __serverStateMarkHydrateFailed(why) {
+  __serverStateWriteSuppressed = true;
+  if (typeof ttvDiag === 'function') {
+    ttvDiag('state-hydrate-failed', { why: why, suppressing_puts: true });
+  }
+}
 function __serverStatePut(key, value) {
   if (!__serverStateShouldSync(key)) return;
+  if (__serverStateWriteSuppressed) {
+    if (typeof ttvDiag === 'function') ttvDiag('state-put-suppressed', { key: key });
+    return;
+  }
   // Fire-and-forget; failures land in console.error + diag log.
   // The localStorage write has already happened, so even if the
   // server PUT fails the UI still has correct state in this
@@ -776,6 +794,10 @@ function __serverStatePut(key, value) {
 }
 function __serverStateDelete(key) {
   if (!__serverStateShouldSync(key)) return;
+  if (__serverStateWriteSuppressed) {
+    if (typeof ttvDiag === 'function') ttvDiag('state-delete-suppressed', { key: key });
+    return;
+  }
   fetch('/api/state/' + encodeURIComponent(key), {
     method: 'DELETE',
   }).then(function(r) {
@@ -799,16 +821,19 @@ async function hydrateServerState() {
     resp = await fetch('/api/state', { cache: 'no-store' });
   } catch (e) {
     console.warn('[ttyview] /api/state fetch failed; using localStorage-only state', e);
+    __serverStateMarkHydrateFailed('fetch-threw');
     return;
   }
   if (!resp.ok) {
     console.warn('[ttyview] /api/state → ' + resp.status + '; using localStorage-only state');
+    __serverStateMarkHydrateFailed('status-' + resp.status);
     return;
   }
   let body;
   try { body = await resp.json(); }
   catch (e) {
     console.warn('[ttyview] /api/state parse failed', e);
+    __serverStateMarkHydrateFailed('parse-failed');
     return;
   }
   const keys = (body && body.keys) || {};
