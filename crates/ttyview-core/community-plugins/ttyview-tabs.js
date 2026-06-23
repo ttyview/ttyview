@@ -91,6 +91,13 @@
   // mid-press. Still small enough that a deliberate horizontal scroll of
   // a tab row (which travels much further) cancels as before.
   const MARK_DRIFT_PX = 36;
+  // A press held at least this long is treated as a DELIBERATE hold, not a
+  // quick tap. When the mark gesture was armed but the finger lifts before a
+  // mark stage fires (released early), we swallow the tap instead of falling
+  // through to onTap() — otherwise an aborted "long-press to change the dot"
+  // silently switches to the tab and bumps it to the front of the recent row.
+  // Quick taps (< this) still switch as before.
+  const HOLD_SUPPRESS_MS = 250;
   const MARK_BUBBLE_LIFT = 72;   // px the state popup floats above the tab top (clear of the fingertip)
   const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row
   const RECENTS_KEY = 'recents';
@@ -1615,6 +1622,7 @@
   function attachTabGesture(btn, session, paneId, onTap) {
     if (session) btn.dataset.session = session;
     let t1 = null, t2 = null, acted = false, startX = 0, startY = 0;
+    let armed = false;   // true once the mark-hold timer is armed on this press
     let tDown = 0;   // performance.now() at pointerdown — timing baseline
     function now() { try { return performance.now(); } catch (_) { return 0; } }
     // Gesture telemetry → diag.jsonl (cat 'mark-gesture'). Each record
@@ -1638,11 +1646,13 @@
     }
     btn.addEventListener('pointerdown', function(e) {
       acted = false;
+      armed = false;
       startX = e.clientX; startY = e.clientY;
       tDown = now();
       clearTimers();
       // Pin mode owns the tap (pin/unpin); don't also arm marking.
       if (!marksOn() || !session || pinMode || labelMode) return;
+      armed = true;   // marking is in play — a deliberate hold must not select
       const delay = markDelay();
       const before = marks[session] || '';
       gd('down', { delay: delay, before: before || null });
@@ -1691,6 +1701,11 @@
       hideMarkBubble();
       if (acted) { acted = false; const r0 = now(); render(); gd('up-render', { renderMs: Math.round(now() - r0) }); return; }   // a mark fired → sync duplicates, not a tap
       if (e.button !== undefined && e.button !== 0) return;
+      // Deliberate hold released early (mark armed but no stage fired): the
+      // user was trying to change the dot, not switch tabs. Swallow it so it
+      // doesn't select the pane and bump it to the front of the recent row.
+      const heldMs = Math.round(now() - tDown);
+      if (armed && heldMs >= HOLD_SUPPRESS_MS) { gd('hold-cancel', { heldMs: heldMs }); return; }
       gd('tap', {});
       if (labelMode) { if (session) startInlineEdit(btn, session); return; }
       if (pinMode) { togglePin(session, paneId); return; }
