@@ -695,10 +695,32 @@
         font-size: 13px; line-height: 15px; font-weight: 600;
       }
       body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-tag {
-        font-size: 11px; line-height: 14px;
+        font-size: 11px; line-height: 14px; text-align: left;
       }
       body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-tagedit {
         font-size: 12px; line-height: 16px;
+      }
+      /* ---- Card head row (name + dot + ⋮) ---------------------------
+         The name line is wrapped in a STABLE .ttvtab-head so the dot and
+         mobile-cc-tab-menu's ⋮ can sit as flex children on one centered
+         row, with the subtitle below. DEFAULT = display:contents (a no-op
+         wrapper) so non-mobile embedders (ttyview-demo / panel) are
+         unchanged — the dot keeps its absolute corner position. Only under
+         body.ttv-tall-tabs does it become a real row:
+           [ name flex:1 ellipsis ] … [ .ttvtab-dot ] [ .mcc-tabmenu-btn ]
+         mobile-cc-tab-menu appends its ⋮ as the LAST child of .ttvtab-head
+         (right of the dot) instead of absolute-positioning. */
+      .ttvtab-head { display: contents; }
+      body.ttv-tall-tabs .ttvtab:not(.ttvtab-railbtn) .ttvtab-head {
+        display: flex; align-items: center; gap: 6px;
+        width: 100%; flex: 1 1 auto; min-width: 0;
+      }
+      body.ttv-tall-tabs .ttvtab-head .ttvtab-label {
+        flex: 1 1 auto; min-width: 0; width: auto; text-align: left;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      body.ttv-tall-tabs .ttvtab-head .ttvtab-dot {
+        position: static; flex: none;
       }
       .ttvtab-add {
         background: transparent;
@@ -1297,10 +1319,15 @@
     const fullText = labelText || pin.session || pin.id || '?';
     label.textContent = fullText;
     btn.title = pin.session || pin.id || '?';
-    btn.appendChild(label);
-    addTagLine(btn, session);
+    // Name + dot share one row (.ttvtab-head); mobile-cc-tab-menu appends its
+    // ⋮ here too. The subtitle (addTagLine) goes BELOW the head.
+    const head = document.createElement('div');
+    head.className = 'ttvtab-head';
+    head.appendChild(label);
     const dot = sessionDot(session);
-    if (dot) btn.appendChild(makeDotEl(dot));
+    if (dot) head.appendChild(makeDotEl(dot));
+    btn.appendChild(head);
+    addTagLine(btn, session);
     attachTabGesture(btn, session, resolved && resolved.id, function() {
       if (resolved) tv.selectPane(resolved.id);
     });
@@ -1482,7 +1509,11 @@
     // separate second line (addTagLine), never a replacement.
     const fullText = pane.session || pane.id || '?';
     label.textContent = fullText;
-    btn.appendChild(label);
+    // Name + (pin mark) + dot share one row (.ttvtab-head); mobile-cc-tab-menu
+    // appends its ⋮ here too. The subtitle (addTagLine) goes BELOW the head.
+    const head = document.createElement('div');
+    head.className = 'ttvtab-head';
+    head.appendChild(label);
     const isPinned = !!pins.find(p => p.session === pane.session);
     // Suppress the 📌 pin mark when a tag is shown — in the two-line
     // column layout it would land on its own row between name and tag.
@@ -1490,16 +1521,17 @@
       const mark = document.createElement('span');
       mark.className = 'ttvtab-pinmark';
       mark.textContent = '📌';
-      btn.appendChild(mark);
+      head.appendChild(mark);
     }
     btn.title = fullText + (pinMode
       ? (isPinned ? ' (tap to unpin)' : ' (tap to pin)')
       : ' (press & hold to mark todo/done)');
     const mk = markOf(pane.session);
     if (mk) btn.classList.add('mark-' + mk);
-    addTagLine(btn, pane.session);
     const dot = sessionDot(pane.session);
-    if (dot) btn.appendChild(makeDotEl(dot));
+    if (dot) head.appendChild(makeDotEl(dot));
+    btn.appendChild(head);
+    addTagLine(btn, pane.session);
 
     attachTabGesture(btn, pane.session, pane.id, function() {
       // Keep the user's actual pane when it's already in this session.
