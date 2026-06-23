@@ -919,6 +919,19 @@
   try {
     window.ttvTabsGetLabel = function (session) { return labelOf(session); };
     window.ttvTabsSetLabel = function (session, text) { setLabel(session, text); render(); };
+    // Remove a session from the MRU recents in-memory + persist + re-render.
+    // A reload-based remove (storage write + location.reload) can't work: on
+    // reload the last-viewed pane re-opens → pane-changed → noteRecent re-adds
+    // it, and hydrateServerState can race the fire-and-forget PUT. Mutating the
+    // live `recents` array here sidesteps both. Returns true if it was present.
+    window.ttvTabsRemoveRecent = function (session) {
+      const i = recents.indexOf(session);
+      if (i < 0) return false;
+      recents.splice(i, 1);
+      saveRecents();
+      render();
+      return true;
+    };
   } catch (_) {}
 
   function render() {
