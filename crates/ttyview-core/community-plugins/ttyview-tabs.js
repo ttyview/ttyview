@@ -99,7 +99,7 @@
   // Quick taps (< this) still switch as before.
   const HOLD_SUPPRESS_MS = 250;
   const MARK_BUBBLE_LIFT = 72;   // px the state popup floats above the tab top (clear of the fingertip)
-  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, recentRows: 1, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row; recentRows 1 = single horizontal-scroll strip, >1 = wrapped grid scrolling vertically
+  const DEFAULTS = { rows: 1, maxPerRow: 0, mode: 'pinned', dots: true, recentRow: true, recentRows: 1, recentWrap: false, marks: true, markDelay: 500, markPopup: true, tabHeight: 28 };  // maxPerRow 0 = unlimited per row; recentRows = recent-area height in tab-rows (FRACTIONAL, half-row steps); recentWrap = wrap recents into a vertical-scroll grid (default off = single horizontal strip; on = grid even at 1 row tall)
   const RECENTS_KEY = 'recents';
   const RECENT_ROW_MAX = 12;    // tabs shown in the always-on recent row (single-row mode)
   const RECENT_STORE_MAX = 30;  // MRU entries kept in storage
@@ -197,6 +197,21 @@
   function tabHeight() {
     const v = parseInt(settings.tabHeight, 10);
     return (v >= 20 && v <= 72) ? v : 28;
+  }
+  // Recent-area visible HEIGHT, in tab-rows. FRACTIONAL allowed (half-row
+  // steps from the settings stepper) so the strip can be e.g. 1.5 rows tall —
+  // a peek of the next row hints it scrolls. Clamped 1‒6.
+  function recentRowsVal() {
+    const v = parseFloat(settings.recentRows);
+    if (!isFinite(v)) return 1;
+    return Math.max(1, Math.min(6, v));
+  }
+  // Whether the recents wrap into a VERTICAL-scrolling grid (vs the single
+  // horizontal-scroll strip). True when the user opted in (the height stepper
+  // sets recentWrap) OR the height is more than one row. Default-off keeps the
+  // original single strip for embedders that never touch this.
+  function recentWrapOn() {
+    return !!settings.recentWrap || recentRowsVal() > 1;
   }
   function setMark(session, mark) {
     if (mark) marks[session] = mark; else delete marks[session];
@@ -901,8 +916,10 @@
         overflow-x: auto; scrollbar-width: none;
         /* The group band already supplies the bracket + left inset, so
            the strip itself carries none — its tabs line up on the same
-           fit-width grid + left column as the group tabs. */
-        padding: 0 0 1px 0;
+           fit-width grid + left column as the group tabs. No padding so
+           the multi-row max-height clamps to EXACTLY N rows. */
+        padding: 0;
+        box-sizing: content-box;
       }
       .ttvtab-recentrow::-webkit-scrollbar { display: none; }
       /* Multi-row recents (settings.recentRows > 1): wrap into a grid that
@@ -1272,8 +1289,11 @@
       // scrolls vertically. Set BEFORE measuring offsetHeight so the
       // reserved height below reflects the capped (visible) height.
       if (rr && rr.classList.contains('multirow')) {
-        const rRows = Math.max(1, settings.recentRows | 0);
-        rr.style.maxHeight = (rRows * h + (rRows - 1) * 4 + 5 /* pad-bottom */) + 'px';
+        const rRows = recentRowsVal();   // FRACTIONAL (half-row steps)
+        // N tab-rows + (N-1) row-gaps, +2px so a whole bottom row's border
+        // isn't sub-pixel-clipped. For a half-row value (e.g. 1.5) this
+        // deliberately leaves a PEEK of the next row as a scroll hint.
+        rr.style.maxHeight = (rRows * h + (Math.ceil(rRows) - 1) * 4 + 2) + 'px';
       }
       // Reserve the whole recent GROUP (header bar + tab strip), not just
       // the strip — the header is always shown even when collapsed.
@@ -1527,8 +1547,8 @@
   // scroll (more recents than fit just scroll), so tab WIDTH matches a
   // group tab while still showing the full MRU list.
   function buildRecentRow(panes, active, fitMode, max, placedTabs) {
-    const recentRows = Math.max(1, settings.recentRows | 0);
-    const multiRow = recentRows > 1;
+    const recentRows = recentRowsVal();
+    const multiRow = recentWrapOn();
     const cap = multiRow ? RECENT_ROW_MAX_MULTI : RECENT_ROW_MAX;
     const live = liveRecents(panes, true).slice(0, cap);
     if (!live.length) return null;
@@ -1697,6 +1717,11 @@
     if (session) btn.dataset.session = session;
     let t1 = null, t2 = null, acted = false, startX = 0, startY = 0;
     let armed = false;   // true once the mark-hold timer is armed on this press
+    let startedOnPassthrough = false;   // press began on a [data-tab-passthrough]
+                                        // child (e.g. the ⋮ menu button): hold-to-
+                                        // mark still works (events bubble here), but
+                                        // a quick TAP must not switch panes — that
+                                        // child owns the tap (opens its own menu).
     let tDown = 0;   // performance.now() at pointerdown — timing baseline
     function now() { try { return performance.now(); } catch (_) { return 0; } }
     // Gesture telemetry → diag.jsonl (cat 'mark-gesture'). Each record
@@ -1722,6 +1747,7 @@
       acted = false;
       armed = false;
       startX = e.clientX; startY = e.clientY;
+      startedOnPassthrough = !!(e.target && e.target.closest && e.target.closest('[data-tab-passthrough]'));
       tDown = now();
       clearTimers();
       // Pin mode owns the tap (pin/unpin); don't also arm marking.
@@ -1780,6 +1806,12 @@
       // doesn't select the pane and bump it to the front of the recent row.
       const heldMs = Math.round(now() - tDown);
       if (armed && heldMs >= HOLD_SUPPRESS_MS) { gd('hold-cancel', { heldMs: heldMs }); return; }
+      // Quick tap that began on a pass-through child (the ⋮ menu button):
+      // that child's own click opens its menu — don't ALSO switch panes. A
+      // hold over the ⋮ still cycled the mark above (acted), so only the
+      // quick-tap select is suppressed here. This is what lets the dot/mark
+      // press-and-hold work across the WHOLE tab incl. the ⋮ area.
+      if (startedOnPassthrough) { gd('passthrough-tap', {}); return; }
       gd('tap', {});
       if (labelMode) { if (session) startInlineEdit(btn, session); return; }
       if (pinMode) { togglePin(session, paneId); return; }
@@ -1955,23 +1987,50 @@
       recLbl.appendChild(recChk);
       recLbl.appendChild(document.createTextNode('Show recent tabs row'));
       rR.appendChild(recLbl);
-      // How many rows tall the recent strip is. 1 = single horizontal-scroll
-      // strip (default); >1 = the recents wrap into that many rows and the
-      // block scrolls vertically instead.
-      const recRowsLbl = document.createElement('label');
-      recRowsLbl.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ttv-fg);margin-top:10px;';
-      recRowsLbl.appendChild(document.createTextNode('Recent rows (1 = single scrolling strip)'));
-      const recRowsInp = document.createElement('input');
-      recRowsInp.type = 'number'; recRowsInp.min = '1'; recRowsInp.max = '6';
-      recRowsInp.value = String(Math.max(1, settings.recentRows | 0) || 1);
-      recRowsInp.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:4px;font:inherit;font-size:14px;padding:6px 10px;width:80px;';
-      recRowsInp.addEventListener('change', function() {
-        const n = Math.max(1, Math.min(6, parseInt(recRowsInp.value, 10) || 1));
-        settings.recentRows = n; recRowsInp.value = String(n);
-        saveSettings(); render();
-      });
-      recRowsLbl.appendChild(recRowsInp);
-      rR.appendChild(recRowsLbl);
+      // Recent-area HEIGHT, in tab-rows — a − / + stepper with HALF-row
+      // resolution. Using it turns on recentWrap, so the recents wrap into a
+      // vertical-scrolling grid: even at 1 row tall you scroll DOWN for older
+      // sessions, and a half-row (1.5 / 2.5 …) leaves a peek of the next row
+      // as a scroll hint. (Replaces the old integer "rows" field.)
+      const recHWrap = document.createElement('div');
+      recHWrap.style.cssText = 'margin-top:12px;';
+      const recHLbl = document.createElement('div');
+      recHLbl.style.cssText = 'font-size:13px;color:var(--ttv-fg);margin-bottom:6px;';
+      recHLbl.textContent = 'Recent area height (scrolls vertically)';
+      recHWrap.appendChild(recHLbl);
+      const recHCtl = document.createElement('div');
+      recHCtl.style.cssText = 'display:flex;align-items:center;gap:8px;';
+      function recStepBtn(txt) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.tabIndex = -1; b.textContent = txt;
+        b.style.cssText = 'width:42px;height:42px;font-size:22px;line-height:1;background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);border-radius:8px;cursor:pointer;';
+        b.addEventListener('mousedown', function(e) { e.preventDefault(); });
+        return b;
+      }
+      const recMinus = recStepBtn('−');
+      const recReadout = document.createElement('div');
+      recReadout.style.cssText = 'min-width:64px;text-align:center;font-size:15px;color:var(--ttv-fg);';
+      const recPlus = recStepBtn('+');
+      function recPaint() {
+        const n = recentRowsVal();
+        recReadout.textContent = (Math.round(n * 2) / 2) + (n === 1 ? ' row' : ' rows');
+      }
+      function recCommit(n) {
+        n = Math.max(1, Math.min(6, Math.round(n * 2) / 2));
+        settings.recentRows = n;
+        settings.recentWrap = true;   // the height stepper implies the vertical-scroll grid
+        saveSettings(); recPaint(); render();
+      }
+      recMinus.addEventListener('click', function() { recCommit(recentRowsVal() - 0.5); });
+      recPlus.addEventListener('click', function() { recCommit(recentRowsVal() + 0.5); });
+      recHCtl.appendChild(recMinus); recHCtl.appendChild(recReadout); recHCtl.appendChild(recPlus);
+      recHWrap.appendChild(recHCtl);
+      const recHint = document.createElement('div');
+      recHint.style.cssText = 'color:var(--ttv-muted);font-size:11px;margin-top:6px;';
+      recHint.textContent = 'Half-row steps. Recents wrap and scroll vertically; a half row leaves a peek of the next as a scroll hint.';
+      recHWrap.appendChild(recHint);
+      recPaint();
+      rR.appendChild(recHWrap);
       container.appendChild(rR);
 
       // Rows
