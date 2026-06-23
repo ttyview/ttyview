@@ -19,6 +19,13 @@ pub struct SemanticEvent {
     pub data: serde_json::Value,
 }
 
+/// In-process observer an embedder can register to react to semantic events
+/// server-side (e.g. mobile-cc firing a Web Push on `claude.permission_prompt`
+/// / `pane.idle_after_activity`). Invoked synchronously at the emission site
+/// alongside the WS broadcast — keep the closure cheap (enqueue, don't block).
+/// Args: `(pane_id, &event)`.
+pub type SemanticHook = std::sync::Arc<dyn Fn(&str, &SemanticEvent) + Send + Sync>;
+
 pub struct DetectContext<'a> {
     pub pane_id: &'a str,
     pub screen: &'a Screen,

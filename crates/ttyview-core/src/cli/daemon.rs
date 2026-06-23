@@ -94,6 +94,15 @@ pub struct RunOptions {
     /// search); also the lane the future Web Push `/api/push/*` routes
     /// will use.
     pub extra_api: Option<Box<dyn FnOnce(axum::Router) -> axum::Router + Send>>,
+    /// Embedder observer fired on every semantic event (beside the WS
+    /// broadcast), in-process. mobile-cc registers this to trigger Web
+    /// Push on `claude.permission_prompt` / `pane.idle_after_activity`.
+    /// `None` = no observer.
+    pub on_semantic: Option<crate::detectors::SemanticHook>,
+    /// When `Some`, the daemon runs an idle sweep that emits a
+    /// `pane.idle_after_activity` semantic event once a pane that produced
+    /// output stays quiet this long. `None` = no idle sweep (default).
+    pub idle_event_threshold: Option<std::time::Duration>,
 }
 
 /// Defaults are intentionally conservative: loopback bind, no TLS, no
@@ -121,6 +130,8 @@ impl Default for RunOptions {
             extra_static: Vec::new(),
             max_scrollback: None,
             extra_api: None,
+            on_semantic: None,
+            idle_event_threshold: None,
         }
     }
 }
@@ -157,6 +168,8 @@ pub async fn run_with_options(
         extra_static: Vec::new(),
         max_scrollback: None,
         extra_api: None,
+        on_semantic: None,
+        idle_event_threshold: None,
     }).await
 }
 
@@ -166,6 +179,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         tls_cert, tls_key, diag_log, registry_url,
         demo_mode, read_only, config_dir, app_name, uploads_dir,
         allowed_origins, extra_static, max_scrollback, extra_api,
+        on_semantic, idle_event_threshold,
     } = opts;
     let socket = socket.as_deref();
     let tls_cert = tls_cert.as_deref();
@@ -218,7 +232,11 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     let mut store = PaneStore::new(rows, cols);
     store.set_tmux_socket(socket.map(String::from));
     store.set_max_scrollback(max_scrollback);
+    store.set_on_semantic(on_semantic);
+    store.set_idle_threshold(idle_event_threshold);
     store.install_tracer_from_env().await;
+    // Start the idle sweep (no-op unless idle_event_threshold is Some).
+    store.spawn_idle_sweep();
 
     if demo_mode {
         // No tmux. Seed five synthetic panes so the picker / pinned-

@@ -145,6 +145,8 @@ async fn main() -> anyhow::Result<()> {
         extra_static: Vec::new(),
         extra_api: None,
         max_scrollback: None,
+        on_semantic: None,
+        idle_event_threshold: None,
     })
     .await
 }

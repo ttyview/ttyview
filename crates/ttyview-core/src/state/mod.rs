@@ -5,7 +5,7 @@
 //! for live events. The `state` module is `Source`-agnostic — anything that
 //! produces `SourceEvent`s can drive it via [`PaneStore::apply`].
 
-use crate::detectors::{Bundle, DetectContext, SemanticEvent};
+use crate::detectors::{Bundle, DetectContext, SemanticEvent, SemanticHook};
 use crate::grid::Cell;
 use crate::source::{PaneId, SourceEvent};
 use crate::Term;
@@ -36,6 +36,12 @@ pub struct PaneState {
     /// pattern is by definition one of those spurious re-emissions and we
     /// drop it. See `chunk_is_cc_reemission()` below.
     pub cc_banner_seen: bool,
+    /// Idle-sweep bookkeeping (drives the `pane.idle_after_activity`
+    /// semantic event). `had_output` gates out panes that never produced
+    /// anything; `idle_emitted` makes the idle event fire ONCE per
+    /// active→idle transition (reset when fresh output arrives).
+    pub had_output: bool,
+    pub idle_emitted: bool,
 }
 
 impl PaneState {
@@ -47,6 +53,8 @@ impl PaneState {
             session: None,
             window: None,
             cc_banner_seen: false,
+            had_output: false,
+            idle_emitted: false,
         }
     }
 
@@ -237,6 +245,14 @@ pub struct PaneStore {
     /// `~/.local/share/panel/parser-trace.jsonl`). The file is binary-safe:
     /// bytes are hex-encoded so the JSONL stays grep-friendly.
     tracer: Option<Arc<BytesTracer>>,
+    /// Embedder hook fired on every semantic event (in addition to the WS
+    /// broadcast). `None` = no observer. Set by mobile-cc to trigger Web
+    /// Push. See [`SemanticHook`].
+    on_semantic: Option<SemanticHook>,
+    /// When `Some`, a background sweep emits `pane.idle_after_activity`
+    /// once a pane that produced output goes quiet for this long. `None`
+    /// = no idle sweep (the default; mobile-cc opts in).
+    idle_threshold: Option<std::time::Duration>,
 }
 
 struct BytesTracer {
@@ -308,6 +324,8 @@ impl PaneStore {
             tmux_socket: None,
             max_scrollback: None,
             tracer: None,
+            on_semantic: None,
+            idle_threshold: None,
         }
     }
 
@@ -321,6 +339,75 @@ impl PaneStore {
     /// the `Screen::new` default. Affects panes created after this call.
     pub fn set_max_scrollback(&mut self, n: Option<usize>) {
         self.max_scrollback = n;
+    }
+
+    /// Register an embedder observer fired on every semantic event (beside
+    /// the WS broadcast). Used by mobile-cc for Web Push.
+    pub fn set_on_semantic(&mut self, cb: Option<SemanticHook>) {
+        self.on_semantic = cb;
+    }
+
+    /// Enable the idle sweep: emit `pane.idle_after_activity` once a pane
+    /// that produced output stays quiet for `d`. `None` disables it.
+    /// Call [`PaneStore::spawn_idle_sweep`] after setting this to start the
+    /// background task.
+    pub fn set_idle_threshold(&mut self, d: Option<std::time::Duration>) {
+        self.idle_threshold = d;
+    }
+
+    /// Start the idle-sweep background task if a threshold is configured.
+    /// No-op when `idle_threshold` is `None`. Idempotent enough for one
+    /// call at startup (each call spawns one task; call exactly once).
+    pub fn spawn_idle_sweep(&self) {
+        let threshold = match self.idle_threshold {
+            Some(t) => t,
+            None => return,
+        };
+        let store = self.clone();
+        tokio::spawn(async move {
+            // Sweep cadence is coarse relative to the threshold — a few
+            // seconds of latency on an "idle" notification is fine.
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                let ids: Vec<PaneId> = store.panes.iter().map(|e| e.key().clone()).collect();
+                for id in ids {
+                    let slot = match store.get(&id) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let fire = {
+                        let mut s = slot.state.write().await;
+                        if s.had_output
+                            && !s.idle_emitted
+                            && s.last_byte_at.elapsed() >= threshold
+                        {
+                            s.idle_emitted = true;
+                            Some(s.term.screen.generation)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(gen) = fire {
+                        let ev = SemanticEvent {
+                            name: "pane.idle_after_activity".to_string(),
+                            at_gen: gen,
+                            data: serde_json::json!({
+                                "pane": id.0,
+                                "idle_ms": threshold.as_millis() as u64,
+                            }),
+                        };
+                        if let Some(cb) = &store.on_semantic {
+                            cb(&id.0, &ev);
+                        }
+                        let _ = slot.tx.send(LiveEvent::Semantic {
+                            pane: id.0.clone(),
+                            event: ev,
+                        });
+                    }
+                }
+            }
+        });
     }
 
     /// Enable the optional bytes tracer (driven by env vars). Idempotent —
@@ -429,6 +516,10 @@ impl PaneStore {
                     let mut s = slot.state.write().await;
                     s.term.feed(&bytes);
                     s.last_byte_at = Instant::now();
+                    // Fresh output → this pane is active again; re-arm the
+                    // idle sweep so it can fire once it next goes quiet.
+                    s.had_output = true;
+                    s.idle_emitted = false;
                     let gen = s.term.screen.generation;
                     let alt = s.term.screen.alt_active();
                     let row = s.term.screen.cursor.row;
@@ -452,6 +543,11 @@ impl PaneStore {
                     scrollback_len: sb_len,
                 });
                 for ev in semantic_events {
+                    // Embedder hook (mobile-cc Web Push) fires beside the WS
+                    // broadcast. Keep it cheap — it should enqueue, not block.
+                    if let Some(cb) = &self.on_semantic {
+                        cb(&pane.0, &ev);
+                    }
                     let _ = slot.tx.send(LiveEvent::Semantic {
                         pane: pane.0.clone(),
                         event: ev,
