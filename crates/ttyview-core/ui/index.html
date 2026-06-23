@@ -335,7 +335,7 @@
      trio just consumes header space on a phone. */
   header .font-ctl { display: none; gap: 2px; }
   body.ttv-show-font-ctl header .font-ctl { display: flex; }
-  header .font-ctl button { padding: 4px 6px; min-width: 26px; }
+  header .font-ctl button { padding: 4px 6px; min-width: 40px; min-height: 36px; }
   header .status {
     margin-left: 4px;
     width: 10px; height: 10px;
@@ -619,17 +619,23 @@
   </button>
   <!-- Hidden native select kept for tests + a11y; mirrors the picker. -->
   <select id="pane-select" style="display:none" aria-hidden="true"></select>
-  <button id="refresh" title="Refresh pane list">↻</button>
+  <button id="refresh" title="Refresh pane list" aria-label="Refresh pane list">↻</button>
   <span class="font-ctl">
-    <button id="font-down" title="Smaller font">A−</button>
-    <button id="font-fit" title="Auto-fit pane to viewport">↔</button>
-    <button id="font-up" title="Larger font">A+</button>
+    <button id="font-down" title="Smaller font" aria-label="Smaller font">A−</button>
+    <button id="font-fit" title="Auto-fit pane to viewport" aria-label="Auto-fit font to viewport">↔</button>
+    <button id="font-up" title="Larger font" aria-label="Larger font">A+</button>
   </span>
-  <button id="scroll-bottom" title="Scroll to live tail">↓</button>
-  <button id="settings-btn" title="Settings">⚙</button>
+  <button id="scroll-bottom" title="Scroll to live tail" aria-label="Scroll to live tail">↓</button>
+  <button id="settings-btn" title="Settings" aria-label="Settings">⚙</button>
   <span id="header-widgets" data-slot="header-right"><!-- plugin-rendered widgets land here --></span>
   <span class="status" id="status">disconnected</span>
 </header>
+
+<!-- a11y: visually-hidden assertive announcer. Status changes that a sighted
+     user sees (e.g. a Claude permission prompt opening on a pane → amber tab
+     dot) are otherwise silent to a screen reader; JS writes here to announce. -->
+<div id="a11y-live" role="status" aria-live="assertive" aria-atomic="true"
+     style="position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0;"></div>
 
 <div id="pane-picker-overlay" role="dialog" aria-label="Choose a pane">
   <div id="pane-picker-panel" role="listbox">
@@ -1513,6 +1519,39 @@ function setStatus(text, cls) {
   $status.className = 'status' + (cls ? ' ' + cls : '');
 }
 
+// === Connection banner (mobile reconnection UX) =======================
+// A thin, unmistakable bar shown whenever the WS isn't OPEN, so a dropped
+// connection reads as "disconnected — retrying" instead of a frozen-but-green
+// page (the cell grid keeps showing its last frame, which looks live). Pinned
+// to the TOP — deliberately clear of the bottom input row + the keyboard-
+// overlay lift (mobile-cc lifts #input-row; the banner never touches it).
+// pointer-events:none so it can't eat taps. Cleared on reconnect.
+let $connBanner = null;
+function connBanner() {
+  if ($connBanner) return $connBanner;
+  const b = document.createElement('div');
+  b.id = 'ttv-conn-banner';
+  b.setAttribute('role', 'status');
+  b.style.cssText =
+    'position:fixed;top:0;left:0;right:0;z-index:2147483646;' +
+    'font:600 12px/1.4 system-ui,-apple-system,sans-serif;text-align:center;' +
+    'padding:5px 10px;color:#1a1a1a;background:#e0af68;' +
+    'box-shadow:0 1px 6px rgba(0,0,0,.4);transition:transform .15s ease-out;' +
+    'transform:translateY(-100%);pointer-events:none;';
+  (document.body || document.documentElement).appendChild(b);
+  $connBanner = b;
+  return b;
+}
+function showConnBanner(text, danger) {
+  const b = connBanner();
+  b.textContent = text;
+  b.style.background = danger ? '#f7768e' : '#e0af68';
+  b.style.transform = 'translateY(0)';
+}
+function hideConnBanner() {
+  if ($connBanner) $connBanner.style.transform = 'translateY(-100%)';
+}
+
 let panesCache = [];
 
 // === Semantic watch — detector events for ALL panes ===
@@ -1539,7 +1578,10 @@ function syncSemanticSubs() {
   for (const p of panesCache) {
     if (semanticSubs.has(p.id)) continue;
     try {
-      ws.send(JSON.stringify({ t: 'sub', p: p.id, kinds: ['semantic'] }));
+      // 'tick' rides the same all-panes sub so background-pane OUTPUT drives
+      // status-dots without a /panes poll (mcc11 item 2-core). Active pane also
+      // gets tick via its full sub — harmless dup (consumer is idempotent).
+      ws.send(JSON.stringify({ t: 'sub', p: p.id, kinds: ['semantic', 'tick'] }));
       semanticSubs.add(p.id);
     } catch (e) { break; }
   }
@@ -1562,6 +1604,19 @@ function handleSemanticMsg(msg) {
       pane: msg.p, name: ev.name, at_gen: ev.at_gen, data: ev.data,
     });
   } catch (e) { console.error('semantic handler threw', e); }
+  // a11y: announce a Claude permission prompt to screen readers (the sighted
+  // cue is the amber tab dot). Only the prompt opening — not its resolution.
+  if (ev.name === 'claude.permission_prompt') announceA11y('Claude is waiting for permission approval');
+}
+
+// Write to the off-screen aria-live region. Re-set even if the text is
+// unchanged (clear first) so repeated prompts re-announce.
+function announceA11y(text) {
+  const el = document.getElementById('a11y-live');
+  if (!el) return;
+  el.textContent = '';
+  // next frame so the cleared→set transition is observed by the AT.
+  requestAnimationFrame(function () { el.textContent = text; });
 }
 
 // Active-pane button label. Just the session name when unambiguous;
@@ -1772,11 +1827,15 @@ function connectWs() {
   ttvDiag('ws', { ev: 'connecting', retry_ms: wsRetryMs });
   ws.onopen = function() {
     setStatus('connected', 'connected');
+    hideConnBanner();
     wsRetryMs = 1000;
     ttvDiag('ws', { ev: 'open', pane: activePaneId });
     // Fresh socket — every previous sub is gone server-side.
     semanticSubs.clear();
     syncSemanticSubs();
+    // Clients no longer poll /api/state — refetch on every (re)connect.
+    // live-sync listens for this. (mcc11 item 3)
+    try { window.ttyview._internal.emit('connection-open', {}); } catch (e) {}
     if (activePaneId) {
       ws.send(JSON.stringify({ t: 'sub', p: activePaneId }));
       // Resync the grid: cell-diffs are deltas, and anything emitted
@@ -1821,6 +1880,20 @@ function connectWs() {
     // too — handle them before the active-pane filter.
     if (msg.t === 'semantic') {
       handleSemanticMsg(msg);
+      return;
+    }
+    // Global: server /api/state changed (PUT/PATCH/DELETE). No .p — pre-filter,
+    // before the active-pane gate. live-sync refetches on this (replaces its
+    // 1.5s poll). (mcc11 battery-trio item 3)
+    if (msg.t === 'state-changed') {
+      try { window.ttyview._internal.emit('state-changed', {}); } catch (e) {}
+      return;
+    }
+    // Pane output tick for ANY pane (active + background). Must sit before the
+    // pane gate or bg-pane ticks get dropped. Drives status-dots without a
+    // /panes poll; nothing else consumes tick. (mcc11 item 2-core)
+    if (msg.t === 'tick') {
+      try { window.ttyview._internal.emit('tick', msg); } catch (e) {}
       return;
     }
     if (msg.t === 'closed') {
@@ -1875,6 +1948,9 @@ function connectWs() {
   ws.onclose = function(ev) {
     ttvDiag('ws', { ev: 'close', code: ev?.code, reason: ev?.reason || '', clean: !!ev?.wasClean, retry_ms: wsRetryMs });
     setStatus('reconnecting in ' + (wsRetryMs/1000) + 's…');
+    showConnBanner(navigator.onLine === false
+      ? 'Offline — waiting for network…'
+      : 'Disconnected — reconnecting…', navigator.onLine === false);
     wsReconnectTimer = setTimeout(connectWs, wsRetryMs);
     wsRetryMs = Math.min(wsRetryMs * 2, 15000);
   };
@@ -1899,6 +1975,7 @@ let lastResumeResyncTs = 0;
 
 function forceWsReconnect(reason) {
   ttvDiag('ws', { ev: 'force-reconnect', reason: reason });
+  showConnBanner('Reconnecting…');
   if (ws) {
     // Detach handlers before close(): on a dead TCP the close event
     // can take the full closing-handshake timeout, and onclose would
@@ -1968,6 +2045,61 @@ document.addEventListener('resume', function() {
   ttvDiag('lifecycle', { ev: 'resume', frozen_ms: Math.round(gap) });
   if (document.visibilityState === 'visible') resumeResync(gap, 'resume');
 });
+
+// === Network online/offline =========================================
+// resumeResync only fires on visibility/lifecycle/stall — none of which
+// happen on a wifi↔cell handoff or tunnel blip while the page stays
+// FOREGROUNDED. The Network Information events close that gap: reconnect
+// the instant the network returns (don't wait out the ≤15s backoff), and
+// show the disconnected state immediately when it drops.
+window.addEventListener('online', function() {
+  ttvDiag('ws', { ev: 'net-online', ws_state: ws ? ws.readyState : -1 });
+  if (!ws || ws.readyState !== WebSocket.OPEN) forceWsReconnect('net-online');
+});
+window.addEventListener('offline', function() {
+  ttvDiag('ws', { ev: 'net-offline' });
+  setStatus('offline — waiting for network');
+  showConnBanner('Offline — waiting for network…', true);
+});
+
+// === Foreground WS heartbeat ========================================
+// The core mobile failure mode: the WS dies while the page is VISIBLE
+// (handoff / tunnel blip / user watching CC). Mobile TCP often won't fire
+// `onclose` for minutes on a half-open socket, and no resume/stall event
+// fires if the user stays foregrounded → frozen pane under a green
+// "connected" dot. So actively probe: while visible + OPEN, if no inbound
+// message for HEARTBEAT_IDLE_MS, send an idempotent re-sub (the server acks
+// it — same liveness trick resumeResync uses, no new server message) and
+// require ANY inbound within HEARTBEAT_WAIT_MS, else force a reconnect.
+// Gated on `visible` (hidden is covered by resumeResync + saves battery);
+// the no-traffic case is fine — an idle CC pane is silent, so we probe
+// rather than infer death from silence.
+const HEARTBEAT_TICK_MS = 8000;
+const HEARTBEAT_IDLE_MS = 12000;
+const HEARTBEAT_WAIT_MS = 4000;
+let heartbeatPendingTs = 0;
+setInterval(function() {
+  if (document.visibilityState !== 'visible') return;
+  if (!activePaneId) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;  // backoff path owns this
+  const now = Date.now();
+  // A probe is already in flight — did it get answered?
+  if (heartbeatPendingTs) {
+    if (lastWsMsgTs >= heartbeatPendingTs) { heartbeatPendingTs = 0; return; }  // alive
+    if (now - heartbeatPendingTs >= HEARTBEAT_WAIT_MS) {
+      heartbeatPendingTs = 0;
+      ttvDiag('ws', { ev: 'heartbeat-timeout' });
+      forceWsReconnect('heartbeat');
+    }
+    return;
+  }
+  // No recent inbound → send a liveness probe and start the wait window.
+  if (now - lastWsMsgTs >= HEARTBEAT_IDLE_MS) {
+    heartbeatPendingTs = now;
+    try { ws.send(JSON.stringify({ t: 'sub', p: activePaneId })); }
+    catch (e) { heartbeatPendingTs = 0; forceWsReconnect('heartbeat-send-failed'); }
+  }
+}, HEARTBEAT_TICK_MS);
 
 // Per-pane compose drafts. The #input-text textarea is global, but a tab tap
 // flips the active pane synchronously — so without this, a draft typed while
@@ -4003,6 +4135,8 @@ function submitInput() {
     flashSendBtnError();
     return;
   }
+  // Haptic confirmation on a CONFIRMED send (mobile; no-op where unsupported).
+  try { if (navigator.vibrate) navigator.vibrate(22); } catch (_) {}
   $input.value = '';
   try { paneDrafts[activePaneId] = ''; } catch {}
   autoResizeInput();
