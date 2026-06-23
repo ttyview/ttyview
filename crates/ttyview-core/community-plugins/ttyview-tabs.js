@@ -978,6 +978,17 @@
   try {
     window.ttvTabsGetLabel = function (session) { return labelOf(session); };
     window.ttvTabsSetLabel = function (session, text) { setLabel(session, text); render(); };
+    // Set a session's todo/done MARK (the pink/green left-edge line) the same
+    // way a long-press does — persists (setMark → storage → /api/state) and
+    // re-renders live. mark: 'todo' (pink) | 'done' (green) | null/'' to clear.
+    // Lets the ⋮ menu offer a Mark action and lets an out-of-page agent's
+    // server-side write be applied live (mobile-cc-tab-color-sync polls + calls
+    // this). Mirrors window.ttvTabsSetLabel.
+    window.ttvTabsSetMark = function (session, mark) {
+      if (mark !== 'todo' && mark !== 'done') mark = null;
+      setMark(session, mark);
+      render();
+    };
     // Remove a session from the MRU recents in-memory + persist + re-render.
     // A reload-based remove (storage write + location.reload) can't work: on
     // reload the last-viewed pane re-opens → pane-changed → noteRecent re-adds
