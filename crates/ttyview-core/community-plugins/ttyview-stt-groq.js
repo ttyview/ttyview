@@ -18,10 +18,21 @@
 //     localStorage; on a loopback/tailnet-only daemon that's your own
 //     browser profile, but don't paste a key you can't rotate.
 //
-// While a Groq recording runs, Web Speech (when available) provides a
-// live interim preview in the textarea; the final Groq transcript
-// replaces it. If the Groq call fails, the preview text is kept as a
-// degraded-but-useful fallback.
+// While a Groq recording runs, a LIVE PREVIEW streams words into the
+// textarea as you speak; the final Groq transcript replaces it when you
+// stop. If the Groq call fails, the preview text is kept as a
+// degraded-but-useful fallback. Two preview engines, auto-selected:
+//   • Deepgram streaming (preferred when a Deepgram key is set) — the
+//     SAME MediaRecorder chunks fan out to a browser-direct WebSocket
+//     (wss://api.deepgram.com/v1/listen, nova-3, interim_results). This
+//     is the only real-time engine that works ON ANDROID, where the
+//     platform Web Speech recognizer can't share the mic with
+//     MediaRecorder. Browser-direct via the ['token', key] subprotocol —
+//     no daemon proxy needed (a port of tmux-web's /ws/deepgram). BYO
+//     Deepgram key in Settings → Voice Input.
+//   • Web Speech (fallback when there's no Deepgram key) — the browser's
+//     SpeechRecognition. Desktop only; skipped on Android for the
+//     mic-contention reason above.
 //
 // Stage timings + errors are logged via window.ttyviewLog('stt-groq',…)
 // when the logs plugin is present (Settings → Client Logs).
@@ -37,9 +48,10 @@
   const DEFAULTS = {
     engine: 'webspeech',           // 'webspeech' | 'groq'
     groqKey: '',
+    deepgramKey: '',               // BYO — enables real-time streaming preview (works on Android)
     language: 'en',                // Whisper language hint; '' = auto-detect
     cleanup: true,                 // LLM cleanup pass after Whisper
-    livePreview: true,             // Web Speech interim preview during Groq recording
+    livePreview: true,             // live interim preview during Groq recording (Deepgram if keyed, else Web Speech)
     vocab: 'Claude Code, tmux, ttyview, mobile-cc, git, commit, rebase, branch, ' +
            'repo, diff, merge, cargo, rustc, npm, systemd, journalctl, ssh, sudo, ' +
            'regex, JSON, API, CLI, stdout, stderr, localhost, daemon, plugin',
@@ -47,11 +59,17 @@
   const STT_MODEL = 'whisper-large-v3-turbo';
   const CLEANUP_MODEL = 'llama-3.3-70b-versatile';
   const GROQ_BASE = 'https://api.groq.com/openai/v1';
+  const DG_LISTEN = 'wss://api.deepgram.com/v1/listen';   // Deepgram streaming STT
+  const DG_MODEL = 'nova-3';
   const MAX_RECORD_MS = 120000;    // safety cap — a forgotten mic shouldn't record forever
 
   // Ported from tmux-web's CLEANUP_PROMPTS['technical-vocab'], generalized.
   const CLEANUP_PROMPT =
     'Clean this dictated text for a developer driving Claude Code in a terminal. ' +
+    'Ensure the result has natural sentence capitalization and punctuation ' +
+    '(periods, commas, question marks) the way a person would type it — add ' +
+    'punctuation and capitalization where the raw transcript lacks it, without ' +
+    'changing the wording. ' +
     'Correct obvious near-misses for technical words, paths, flags, and session names ' +
     'only when they are clearly present in the transcript. Never invent terms from ' +
     'context. Whisper STT frequently hallucinates a trailing "Thank you", "Thanks for ' +
@@ -89,6 +107,10 @@
     if (!el) return;
     el.value = t;
     el.dispatchEvent(new Event('input', { bubbles: true }));
+    // The textarea caps its height (~120px) then scrolls. As live
+    // transcription appends words, keep the caret/tail in view so the
+    // newest words are visible instead of stuck above the fold.
+    el.scrollTop = el.scrollHeight;
   }
   // Committed text the dictation appends after — whatever was already typed.
   function typedBase() {
@@ -167,8 +189,19 @@
     fd.append('model', STT_MODEL);
     fd.append('response_format', 'json');
     if (settings.language) fd.append('language', settings.language);
-    // Whisper "prompt" biases recognition toward this vocabulary.
-    if (settings.vocab) fd.append('prompt', settings.vocab.slice(0, 800));
+    // Whisper "prompt" both biases recognition toward this vocabulary AND
+    // primes the OUTPUT STYLE. A bare comma word-list makes Whisper emit
+    // lowercase, unpunctuated text (why the final used to look "flatter"
+    // than the Deepgram live preview). Lead with a properly punctuated
+    // sentence so the transcript keeps sentence casing + punctuation, then
+    // append the vocabulary for biasing.
+    if (settings.vocab) {
+      fd.append('prompt',
+        'The following is a clearly punctuated technical message. Vocabulary: ' +
+        settings.vocab.slice(0, 760));
+    } else {
+      fd.append('prompt', 'The following is a clearly punctuated technical message.');
+    }
     const t0 = performance.now();
     const r = await fetch(GROQ_BASE + '/audio/transcriptions', {
       method: 'POST',
@@ -250,13 +283,123 @@
 
       // State machine: 'idle' | 'recording' | 'transcribing' (groq only).
       let state = 'idle';
+      // Set when the user hits Send while a recording/transcription is in
+      // flight: instead of sending the half-finished preview text, we stop
+      // the recording, let the pipeline (Whisper + LLM cleanup) finish, and
+      // auto-send the final text once the textarea settles. Gives a second
+      // way to finish dictation — tap the mic OR tap Send.
+      let pendingSend = false;
       let base = '';            // committed text — typed prefix + finalized speech
-      let preview = '';         // last Web Speech text during a Groq recording
+      let preview = '';         // latest live-preview text (Deepgram or Web Speech)
+      let previewLocked = false;// once the Groq final lands, stop letting late preview events clobber it
       let rec = null;           // SpeechRecognition (webspeech engine / preview)
       let mediaRec = null;      // MediaRecorder (groq engine)
       let chunks = [];
       let mime = '';
       let safetyTimer = null;
+      // Deepgram streaming preview state.
+      let dgWs = null;          // WebSocket to Deepgram (browser-direct)
+      let dgFinals = [];        // finalized utterances, in order
+      let dgInterim = '';       // most recent interim
+      let dgPending = [];       // chunks captured before the WS handshake completed (preserves WebM header)
+
+      // Which live-preview engine to run during a Groq recording. Deepgram
+      // wins when keyed — it's the only one that works on Android (the
+      // platform Web Speech recognizer can't share the mic with
+      // MediaRecorder there). Web Speech is the desktop-only fallback.
+      function previewEngine(settings) {
+        if (!settings.livePreview) return 'none';
+        if (settings.deepgramKey) return 'deepgram';
+        if (SR && !IS_ANDROID) return 'webspeech';
+        return 'none';
+      }
+
+      // --- Deepgram streaming (browser-direct; auth via subprotocol) ---
+      function dgCompose() {
+        const parts = [];
+        if (dgFinals.length) parts.push(dgFinals.join(' ').trim());
+        if (dgInterim) parts.push(dgInterim.trim());
+        return parts.join(' ').replace(/\s+/g, ' ').trim();
+      }
+
+      // Fan a MediaRecorder chunk out to Deepgram. Buffer until the WS is
+      // OPEN so the first chunk (WebM container header) always arrives
+      // first — without it Deepgram can't parse the stream and stays silent.
+      function dgFeed(blob) {
+        if (!dgWs) return;
+        blob.arrayBuffer().then(function(buf) {
+          if (!dgWs) return;
+          if (dgWs.readyState === WebSocket.OPEN) {
+            try { dgWs.send(buf); } catch (_) {}
+          } else if (dgWs.readyState === WebSocket.CONNECTING) {
+            dgPending.push(buf);
+          }
+        }).catch(function() {});
+      }
+
+      function startDeepgram(settings) {
+        dgFinals = []; dgInterim = ''; dgPending = [];
+        const params = new URLSearchParams({
+          model: DG_MODEL,
+          language: settings.language || 'en',
+          interim_results: 'true',
+          smart_format: 'true',
+          punctuate: 'true',
+          endpointing: '300',
+        });
+        // Nova-3 keyterm biasing from the same vocabulary list.
+        (settings.vocab || '').split(',')
+          .map(function(s) { return s.trim(); })
+          .filter(Boolean).slice(0, 100)
+          .forEach(function(t) { params.append('keyterm', t); });
+        let ws;
+        try {
+          // Browsers can't set an Authorization header on a WebSocket;
+          // Deepgram accepts the key as the second subprotocol token.
+          ws = new WebSocket(DG_LISTEN + '?' + params.toString(), ['token', settings.deepgramKey]);
+          ws.binaryType = 'arraybuffer';
+        } catch (e) {
+          log('dg-create-error', { error: String(e && e.message || e) });
+          return;
+        }
+        dgWs = ws;
+        const t0 = performance.now();
+        ws.onopen = function() {
+          const flushed = dgPending.length;
+          for (const buf of dgPending) { try { ws.send(buf); } catch (_) { break; } }
+          dgPending = [];
+          log('dg-open', { ms: Math.round(performance.now() - t0), flushed: flushed });
+        };
+        ws.onmessage = function(ev) {
+          let msg;
+          try {
+            const raw = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data);
+            msg = JSON.parse(raw);
+          } catch (_) { return; }
+          if (!msg || msg.type !== 'Results') return;
+          const alt = msg.channel && msg.channel.alternatives && msg.channel.alternatives[0];
+          const txt = ((alt && alt.transcript) || '').trim();
+          if (!txt) return;
+          if (msg.is_final) { dgFinals.push(txt); dgInterim = ''; }
+          else dgInterim = txt;
+          preview = dgCompose();
+          if (!previewLocked) setText(base + preview);
+        };
+        ws.onerror = function() { log('dg-error', {}); };
+        ws.onclose = function(e) {
+          log('dg-close', { code: e && e.code, finals: dgFinals.length, preview_len: preview.length });
+        };
+      }
+
+      function stopDeepgram() {
+        const ws = dgWs;
+        dgWs = null;
+        if (!ws) return;
+        // Ask Deepgram to flush + finalize the last interim before we close,
+        // then give it a moment to send the final transcript back.
+        try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'CloseStream' })); } catch (_) {}
+        setTimeout(function() { try { ws.close(); } catch (_) {} }, 300);
+      }
 
       function setUiState(s) {
         state = s;
@@ -315,6 +458,7 @@
             rec = null;
             setUiState('idle');
             setText(base);
+            finishAutoSend();
           },
         });
         if (rec) setUiState('recording');
@@ -343,16 +487,24 @@
         chunks = [];
         base = typedBase();
         preview = '';
+        previewLocked = false;
+        const eng = previewEngine(settings);
         mediaRec.ondataavailable = function(e) {
-          if (e.data && e.data.size) chunks.push(e.data);
+          if (e.data && e.data.size) {
+            chunks.push(e.data);
+            if (eng === 'deepgram') dgFeed(e.data);
+          }
         };
         mediaRec.onstop = function() {
           stream.getTracks().forEach(function(t) { t.stop(); });
           finishGroq(settings);
         };
-        mediaRec.start();
-        log('record-start', { mime: mime, preview: settings.livePreview && !!SR && !IS_ANDROID });
-        if (settings.livePreview && SR && !IS_ANDROID) {
+        // Deepgram needs a steady stream of chunks; a timeslice makes
+        // ondataavailable fire periodically instead of only at stop.
+        if (eng === 'deepgram') { startDeepgram(settings); mediaRec.start(250); }
+        else mediaRec.start();
+        log('record-start', { mime: mime, preview: eng });
+        if (eng === 'webspeech') {
           rec = startRecognition({ commitFinals: false, onend: function() { rec = null; } });
         }
         setUiState('recording');
@@ -364,6 +516,7 @@
       function stopGroqRecording() {
         clearTimeout(safetyTimer);
         if (rec) { try { rec.abort(); } catch (_) {} rec = null; }
+        stopDeepgram();
         if (mediaRec && mediaRec.state !== 'inactive') {
           try { mediaRec.stop(); } catch (_) {}   // onstop → finishGroq
         }
@@ -375,32 +528,72 @@
         chunks = [];
         log('record-stop', { bytes: blob.size, preview_len: preview.length });
         if (blob.size < 1000) {
+          previewLocked = true;
           setUiState('idle');
           setText(base);
           toast('No audio captured');
+          finishAutoSend();
           return;
         }
         setUiState('transcribing');
-        // Keep whatever the preview heard visible while Groq works.
+        // Keep whatever the preview heard visible while Groq works. Late
+        // Deepgram finals (from CloseStream) keep refining it during the
+        // await — we only lock the text once Groq's canonical result lands.
         setText(base + preview);
         try {
           let text = await groqTranscribe(blob, mime, settings);
           if (text && settings.cleanup) text = await groqCleanup(text, settings);
+          previewLocked = true;
           setUiState('idle');
           if (!text) {
             log('stt-empty', { preview_len: preview.length });
             setText(base + preview);
             if (!preview) toast('No speech detected');
+            finishAutoSend();
             return;
           }
           setText(base + text + ' ');
+          finishAutoSend();
         } catch (e) {
-          // Degrade to the Web Speech preview if we have one.
+          // Degrade to the live-preview text (Deepgram or Web Speech) if any.
+          previewLocked = true;
           setUiState('idle');
           setText(base + preview);
-          toast(String(e && e.message || e) + (preview ? ' — kept Web Speech text' : ''), true);
+          toast(String(e && e.message || e) + (preview ? ' — kept live preview' : ''), true);
+          finishAutoSend();
         }
       }
+
+      // Once the pipeline has settled (final text in the textarea), honor a
+      // Send that arrived mid-recording: click the real Send button now that
+      // state is 'idle', so it goes through core's submitInput (textarea
+      // read + \r + clear + WS-failure handling) unchanged. No-op + clears
+      // the flag when there's nothing to send.
+      function finishAutoSend() {
+        if (!pendingSend) return;
+        pendingSend = false;
+        const el = input();
+        if (!el || !el.value.trim()) return;
+        const sb = document.getElementById('send-btn');
+        if (sb) sb.click();
+      }
+
+      // Intercept Send while a recording/transcription is in flight (capture
+      // phase, so core's own click→submitInput is suppressed). Stop the
+      // recording if needed; finishAutoSend fires when the pipeline settles.
+      function onSendClickCapture(e) {
+        if (state === 'idle') return;   // normal send — let core handle it
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        pendingSend = true;
+        if (state === 'recording') {
+          if (mediaRec) stopGroqRecording();              // Groq engine
+          else if (rec) { try { rec.stop(); } catch (_) {} }  // Web Speech engine
+        }
+        // 'transcribing': pipeline already running; finishAutoSend fires when it settles.
+      }
+      const sendBtnEl = document.getElementById('send-btn');
+      if (sendBtnEl) sendBtnEl.addEventListener('click', onSendClickCapture, true);
 
       btn.addEventListener('pointerup', function(e) {
         if (e.button !== undefined && e.button !== 0) return;
@@ -423,7 +616,9 @@
 
       return function unmount() {
         clearTimeout(safetyTimer);
+        if (sendBtnEl) sendBtnEl.removeEventListener('click', onSendClickCapture, true);
         if (rec) { try { rec.abort(); } catch (_) {} rec = null; }
+        if (dgWs) { try { dgWs.close(); } catch (_) {} dgWs = null; }
         if (mediaRec && mediaRec.state !== 'inactive') {
           try { mediaRec.stream.getTracks().forEach(function(t) { t.stop(); }); } catch (_) {}
           try { mediaRec.stop(); } catch (_) {}
@@ -458,7 +653,9 @@
         'The 🎤 button next to the message box. Web Speech is the browser\'s built-in ' +
         'recognition — free, instant, zero config. Groq records the audio and runs it ' +
         'through Whisper plus an LLM cleanup pass — noticeably more accurate on ' +
-        'technical vocabulary, needs an API key from console.groq.com (free tier works).';
+        'technical vocabulary, needs an API key from console.groq.com (free tier works). ' +
+        'Add a Deepgram key too for real-time preview: with the Groq engine, your words ' +
+        'stream into the box live as you speak, then the Groq transcript replaces them.';
       container.appendChild(intro);
 
       function row(build) {
@@ -559,6 +756,83 @@
         div.appendChild(hint);
       });
 
+      // Deepgram API key + test — enables real-time streaming preview.
+      row(function(div) {
+        const lbl = document.createElement('label');
+        lbl.style.cssText = css.label;
+        lbl.textContent = 'Deepgram API key (real-time live preview)';
+        div.appendChild(lbl);
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;gap:8px;';
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.name = 'deepgram-api-key';
+        inp.placeholder = 'Token…';
+        inp.autocomplete = 'off';
+        inp.spellcheck = false;
+        inp.setAttribute('autocorrect', 'off');
+        inp.setAttribute('autocapitalize', 'off');
+        inp.setAttribute('data-lpignore', 'true');
+        inp.setAttribute('data-1p-ignore', 'true');
+        inp.setAttribute('data-bwignore', 'true');
+        inp.value = s.deepgramKey;
+        inp.style.cssText = css.input + 'flex:1;-webkit-text-security:disc;';
+        inp.addEventListener('change', function() {
+          const cur = loadSettings();
+          cur.deepgramKey = inp.value.trim();
+          saveSettings(cur);
+        });
+        wrap.appendChild(inp);
+        const test = document.createElement('button');
+        test.type = 'button';
+        test.textContent = 'Test';
+        test.style.cssText = 'background:var(--ttv-bg-elev2);color:var(--ttv-fg);border:1px solid var(--ttv-border);' +
+                             'border-radius:4px;font:inherit;font-size:13px;padding:6px 14px;cursor:pointer;';
+        test.addEventListener('click', function() {
+          const key = inp.value.trim();
+          if (!key) { toast('Enter a key first', true); return; }
+          if (!('WebSocket' in window)) { toast('No WebSocket support in this browser', true); return; }
+          test.disabled = true;
+          test.textContent = '…';
+          // Test the exact browser-direct path we use at record time: open
+          // the listen socket with the token subprotocol. onopen ⇒ the key
+          // authenticated; an early close ⇒ rejected. Avoids REST CORS.
+          let done = false;
+          let ws;
+          const finish = function(ok, msg, isErr) {
+            if (done) return;
+            done = true;
+            test.disabled = false;
+            test.textContent = 'Test';
+            toast(msg, isErr);
+            try { if (ws) ws.close(); } catch (_) {}
+          };
+          try {
+            ws = new WebSocket(DG_LISTEN + '?model=' + DG_MODEL, ['token', key]);
+          } catch (e) {
+            finish(false, 'Could not open Deepgram socket: ' + String(e && e.message || e), true);
+            return;
+          }
+          const tid = setTimeout(function() { finish(false, 'Deepgram did not respond', true); }, 5000);
+          ws.onopen = function() { clearTimeout(tid); finish(true, 'Key works ✓', false); };
+          ws.onclose = function(e) {
+            clearTimeout(tid);
+            // 1000/1005 after an onopen is normal; a close before open is auth failure.
+            finish(false, 'Key rejected' + (e && e.code ? ' (code ' + e.code + ')' : ''), true);
+          };
+          ws.onerror = function() { /* onclose carries the verdict */ };
+        });
+        wrap.appendChild(test);
+        div.appendChild(wrap);
+        const hint = document.createElement('div');
+        hint.style.cssText = css.hint;
+        hint.textContent = 'Optional. With a key set, words stream into the message box as you speak ' +
+          '(Deepgram nova-3) — the only live-preview engine that works on Android. The final ' +
+          'transcript still comes from Groq Whisper. Get a key at console.deepgram.com (free credit). ' +
+          'Stored in this browser\'s localStorage for this origin only.';
+        div.appendChild(hint);
+      });
+
       // Language
       row(function(div) {
         const lbl = document.createElement('label');
@@ -603,7 +877,7 @@
         });
       }
       toggleRow('LLM cleanup pass', 'Fixes punctuation, technical near-misses, and Whisper\'s hallucinated trailing sign-offs. Adds ~0.5 s.', 'cleanup');
-      toggleRow('Live preview while recording', 'Shows Web Speech interim text in the message box during a Groq recording; the Groq transcript replaces it. Desktop only — on Android the platform recognizer steals the mic from the recording, so preview is always off there.', 'livePreview');
+      toggleRow('Live preview while recording', 'Streams words into the message box during a Groq recording; the Groq transcript replaces them when you stop. Uses Deepgram (real-time, works on Android) when a Deepgram key is set; otherwise falls back to Web Speech, which is desktop-only — on Android the platform recognizer steals the mic from the recording.', 'livePreview');
 
       // Vocabulary
       row(function(div) {
