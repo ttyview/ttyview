@@ -888,20 +888,21 @@
       }
       .ttvtab-rail .ttvtab.active svg { opacity: 1; }
       /* ---- recent row (A) ---- */
+      /* The recents are a real group now: a bracketed band (reusing
+         .ttvtab-group) with a collapsible header (.ttvtab-rhead) above
+         the tab strip. A muted bracket + 🕘 dot mark it as the recent
+         band (vs the per-project colored group brackets). */
+      .ttvtab-recentgroup { border-left-color: var(--ttv-muted); }
+      .ttvtab-rhead .ttvtab-gdot { background: var(--ttv-muted); }
+      .ttvtab-rhead .ttvtab-gname { color: var(--ttv-muted); }
       .ttvtab-recentrow {
         display: flex; gap: 4px; align-items: center;
         flex: none;
         overflow-x: auto; scrollbar-width: none;
-        /* A tray, visually distinct from the groups: darker, with a
-           hairline separating it from the area below. */
-        background: var(--ttv-bg-elev);
-        border-bottom: 1px solid var(--ttv-border);
-        /* Match a group's left inset (3px bracket + 6px) EXACTLY so
-           recent tabs share the groups' fit-width grid AND align to
-           the same left column. A muted bracket marks the recent band
-           (vs the per-project colored group brackets). */
-        border-left: 3px solid var(--ttv-muted);
-        padding: 0 0 5px 6px;
+        /* The group band already supplies the bracket + left inset, so
+           the strip itself carries none — its tabs line up on the same
+           fit-width grid + left column as the group tabs. */
+        padding: 0 0 1px 0;
       }
       .ttvtab-recentrow::-webkit-scrollbar { display: none; }
       /* Multi-row recents (settings.recentRows > 1): wrap into a grid that
@@ -1274,7 +1275,10 @@
         const rRows = Math.max(1, settings.recentRows | 0);
         rr.style.maxHeight = (rRows * h + (rRows - 1) * 4 + 5 /* pad-bottom */) + 'px';
       }
-      if (rr) recentReserve = rr.offsetHeight + 4 /* leftCol row gap */;
+      // Reserve the whole recent GROUP (header bar + tab strip), not just
+      // the strip — the header is always shown even when collapsed.
+      const rg = leftCol.querySelector('.ttvtab-recentgroup');
+      if (rg) recentReserve = rg.offsetHeight + 4 /* leftCol row gap */;
       // Restore the recent row's scroll (it's rebuilt every render) so a
       // poll/output-driven re-render doesn't snap it back. Single-row mode
       // scrolls horizontally; multi-row scrolls vertically.
@@ -1528,6 +1532,49 @@
     const cap = multiRow ? RECENT_ROW_MAX_MULTI : RECENT_ROW_MAX;
     const live = liveRecents(panes, true).slice(0, cap);
     if (!live.length) return null;
+    const collapsed = !!settings.recentCollapsed;
+
+    // The recents now read as a real group: a collapsible header bar
+    // (.ttvtab-ghead, same control as the project groups) above the tab
+    // strip, both inside a bracketed band (.ttvtab-recentgroup). The
+    // muted bracket + 🕘 dot mark it as the recent band vs the
+    // per-project colored group brackets.
+    const group = document.createElement('div');
+    group.className = 'ttvtab-group ttvtab-recentgroup';
+
+    const head = document.createElement('div');
+    head.setAttribute('role', 'button');
+    head.className = 'ttvtab-ghead ttvtab-rhead';
+    const caret = document.createElement('span');
+    caret.className = 'ttvtab-gcaret';
+    caret.textContent = collapsed ? '▸' : '▾';
+    const dot = document.createElement('span');
+    dot.className = 'ttvtab-gdot';
+    const nm = document.createElement('span');
+    nm.className = 'ttvtab-gname';
+    nm.textContent = 'Recent';
+    const cnt = document.createElement('span');
+    cnt.className = 'ttvtab-gcount';
+    cnt.textContent = String(live.length);
+    head.appendChild(caret);
+    head.appendChild(dot);
+    head.appendChild(nm);
+    head.appendChild(cnt);
+    head.title = (collapsed ? 'Expand' : 'Collapse') + ' recent sessions ('
+      + live.length + ')';
+    head.tabIndex = -1;
+    // Tap = collapse/expand (recents isn't reorderable, so no move mode).
+    head.addEventListener('pointerup', function(e) {
+      if (e.button !== undefined && e.button !== 0) return;
+      settings.recentCollapsed = !collapsed;
+      saveSettings();
+      render();
+    });
+    head.addEventListener('mousedown', function(e) { e.preventDefault(); });
+    group.appendChild(head);
+
+    if (collapsed) return group;
+
     const row = document.createElement('div');
     row.className = 'ttvtab-recentrow' + (multiRow ? ' multirow' : '');
     row.title = 'Recently used sessions';
@@ -1537,7 +1584,8 @@
       row.appendChild(made.el);
       if (fitMode && placedTabs && made.label) placedTabs.push(made);
     }
-    return row;
+    group.appendChild(row);
+    return group;
   }
 
   // All-sessions / recent-mode / recent-row tab. Tap switches;
