@@ -807,6 +807,18 @@
       .ttvtab-row {
         display: flex; gap: 4px; flex-wrap: nowrap;
         overflow-x: auto;
+        /* overflow-y MUST be explicit hidden. With overflow-x set and
+           overflow-y left at its initial visible, the CSS overflow spec
+           coerces overflow-y to auto — making each row a ~5px-tall vertical
+           scroll container that EATS a fast flick (the flick scrolls the row
+           5px and never chains to .ttvtab-content; a slow drag chained fine,
+           so the bug was fling-specific = "stuck on one row"). Verified on a
+           real emulator touch-flick: with this, contentDelta 0 -> 424.
+           Do NOT add touch-action:pan-x here — it confines the touch sequence
+           to horizontal and blocks the vertical pan from reaching content
+           (that regressed to "nothing scrolls"). Recents are a separate class
+           (.ttvtab-recentrow), unaffected. */
+        overflow-y: hidden;
         scrollbar-width: none;
         /* Keep natural height inside the capped column-flex slot —
            without this, a maxHeight on the slot squishes every row
