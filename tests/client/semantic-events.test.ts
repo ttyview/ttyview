@@ -1,7 +1,7 @@
 // Semantic-event plumbing for plugins: tv.on('semantic') must
 // deliver detector events for ALL panes, not just the active one.
 // The daemon only sends events for subscribed panes, so the client
-// lazily adds kinds:['semantic'] subs for every pane when the first
+// lazily adds kinds:['semantic','tick'] subs for every pane when the first ('tick' powers the all-panes status-dot 'active' state)
 // 'semantic' listener registers, keeps them alive across pane
 // switches (unsub drops ALL of a pane's subs server-side), and
 // dedups the active pane's double delivery (full sub + semantic
@@ -54,7 +54,7 @@ describe('semantic events plugin API', () => {
     tv.on('semantic', () => {});
     const semSubs = c.wsSent.filter(m => m.t === 'sub' && Array.isArray(m.kinds));
     expect(semSubs.map(m => m.p).sort()).toEqual(['%1', '%2']);
-    for (const s of semSubs) expect(s.kinds).toEqual(['semantic']);
+    for (const s of semSubs) expect(s.kinds).toEqual(['semantic', 'tick']);
   });
 
   it('delivers semantic frames for background panes and dedups doubles', async () => {

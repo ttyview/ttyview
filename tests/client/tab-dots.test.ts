@@ -1,7 +1,8 @@
 // ttyview-tabs status dots: waiting (permission prompt, semantic
-// events), active (recent output via idle_ms), attention (went idle
-// while not viewed). Loads the real plugin file into the harness DOM
-// and drives it through the same events a live daemon would emit.
+// events), active (recent output via WS 'tick' events — all-panes
+// kinds:['semantic','tick'] subs), attention (active session went idle
+// — DOT_ACTIVE_MS decay — while not viewed). Loads the real plugin file
+// into the harness DOM and drives it through the events a live daemon emits.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -59,10 +60,9 @@ function dotOnTab(c: any, session: string): string | null {
 
 describe('ttyview-tabs status dots', () => {
   it('shows a pulsing active dot for sessions with recent output', async () => {
-    // beta idle 99s, alpha output 0.1s ago
-    const c = await loadWithTabs(100, 99000);
-    const tv = (c.window as any).ttyview;
-    await tv.refreshPanes();
+    const c = await loadWithTabs(99000, 99000);
+    // A pane producing output emits a WS 'tick' → its session goes 'active'.
+    c.recvWs({ t: 'tick', p: '%1', gen: 1 });
     expect(dotOnTab(c, 'alpha')).toBe('active');
     expect(dotOnTab(c, 'beta')).toBeNull();
   });
@@ -82,25 +82,24 @@ describe('ttyview-tabs status dots', () => {
   });
 
   it('active → idle while unviewed becomes attention; viewing clears it', async () => {
-    // active pane is %1/alpha; beta starts active
-    const c = await loadWithTabs(99000, 100);
+    // viewed pane is %1/alpha; beta goes active via a tick
+    const c = await loadWithTabs(99000, 99000);
     const tv = (c.window as any).ttyview;
-    await tv.refreshPanes();
+    c.recvWs({ t: 'tick', p: '%2', gen: 1 });
     expect(dotOnTab(c, 'beta')).toBe('active');
-    // beta goes idle while alpha is viewed → attention
-    c.setFetchResponse('/panes', panes(99000, 99000));
-    await tv.refreshPanes();
+    // No more ticks: after DOT_ACTIVE_MS the active dot decays, and since beta
+    // isn't the viewed session, it becomes 'attention'.
+    await new Promise(r => setTimeout(r, 4200));
     expect(dotOnTab(c, 'beta')).toBe('attention');
     // switching to beta clears it
     await tv.selectPane('%2');
     await new Promise(r => setTimeout(r, 50));
     expect(dotOnTab(c, 'beta')).toBeNull();
-  });
+  }, 9000); // allow for the 4s decay
 
   it('waiting outranks active for the same session', async () => {
-    const c = await loadWithTabs(100, 100);
-    const tv = (c.window as any).ttyview;
-    await tv.refreshPanes();
+    const c = await loadWithTabs(99000, 99000);
+    c.recvWs({ t: 'tick', p: '%1', gen: 1 });
     expect(dotOnTab(c, 'alpha')).toBe('active');
     c.recvWs({
       t: 'semantic', p: '%1',
