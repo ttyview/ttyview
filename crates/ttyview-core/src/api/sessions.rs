@@ -122,11 +122,18 @@ async fn create_session(
         cmd.arg("-c").arg(cwd);
     }
     match cmd.output() {
-        Ok(out) if out.status.success() => Json(OkResp {
-            ok: true,
-            name: Some(req.name),
-        })
-        .into_response(),
+        Ok(out) if out.status.success() => {
+            // Fast-path: poke the reconciler so the new session shows in /panes
+            // within one reconcile instead of waiting out RECONCILE_INTERVAL —
+            // makes new-session + auto-pin feel instant (mirrors the rename
+            // handler).
+            state.reconcile_now.notify_one();
+            Json(OkResp {
+                ok: true,
+                name: Some(req.name),
+            })
+            .into_response()
+        }
         Ok(out) => {
             tracing::warn!(
                 "tmux new-session failed: {}",
