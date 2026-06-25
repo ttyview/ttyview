@@ -255,6 +255,40 @@
   #settings-detail table th, #settings-body table td { padding: 6px 8px; border-bottom: 1px solid var(--ttv-border); text-align: left; }
   #settings-detail table th { color: var(--ttv-muted); font-weight: 500; }
 
+  /* ---- settings search (VSCode-style, flatten + filter) ---- */
+  #settings-search-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; border-bottom: 1px solid var(--ttv-border);
+    flex: none;
+  }
+  #settings-search {
+    flex: 1; min-width: 0; height: 36px; padding: 6px 10px;
+    background: var(--ttv-bg); color: var(--ttv-fg);
+    border: 1px solid var(--ttv-border); border-radius: 6px;
+    font: inherit; font-size: 14px;
+  }
+  #settings-search:focus { border-color: var(--ttv-accent); outline: none; }
+  #settings-search::placeholder { color: #666; }
+  .ss-status { color: var(--ttv-muted); font-size: 12px; flex: none; white-space: nowrap; }
+  /* Search mode: hide the master list, results fill the panel (beats the
+     narrow-viewport media rules below via !important). */
+  #settings-overlay.searching #settings-master { display: none !important; }
+  #settings-overlay.searching #settings-detail { display: block !important; flex: 1; }
+  .ss-group { margin-bottom: 18px; }
+  .ss-group-head {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    background: transparent; border: 0; border-bottom: 1px solid var(--ttv-border);
+    color: var(--ttv-accent); font: inherit; font-weight: 600; font-size: 13px;
+    padding: 6px 0; margin-bottom: 8px;
+  }
+  .ss-group-head:hover { color: var(--ttv-fg); }
+  .ss-row.ss-hide { display: none !important; }
+  mark.ss-hl {
+    background: var(--ttv-accent); color: var(--ttv-bg);
+    border-radius: 2px; padding: 0 1px;
+  }
+  .ss-empty { color: var(--ttv-muted); padding: 16px 2px; font-size: 14px; }
+
   #pane-picker-overlay {
     position: fixed; inset: 0;
     background: rgba(0, 0, 0, 0.55);
@@ -667,6 +701,12 @@
       <button id="settings-back" type="button" aria-label="Back">←</button>
       <span class="title" id="settings-title">Settings</span>
       <button id="settings-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div id="settings-search-row">
+      <input id="settings-search" type="search" placeholder="Search settings…"
+             role="searchbox" aria-label="Search settings" aria-controls="settings-detail"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <span id="settings-search-status" class="ss-status" role="status" aria-live="polite"></span>
     </div>
     <div id="settings-content">
       <div id="settings-master"></div>
@@ -2603,6 +2643,8 @@ async function setPluginEnabled(id, enabled) {
   const $btn     = document.getElementById('settings-btn');
   const $close   = document.getElementById('settings-close');
   const $back    = document.getElementById('settings-back');
+  const $search       = document.getElementById('settings-search');
+  const $searchStatus = document.getElementById('settings-search-status');
 
   // Master/detail layout (Obsidian-pattern):
   //   Wide  (>700px):  master sidebar always visible; clicking an
@@ -2633,6 +2675,9 @@ async function setPluginEnabled(id, enabled) {
   function isNarrow() { return window.matchMedia('(max-width: 700px)').matches; }
 
   function open() {
+    // Settings search is ephemeral per open (no persist): clear any prior
+    // query + leftover search mode so we land on the normal master/detail.
+    resetSearch();
     // Validate saved id against current items list — plugins come
     // and go. Falls back to empty selection.
     const items = allItems();
@@ -2651,7 +2696,7 @@ async function setPluginEnabled(id, enabled) {
     render();
     $overlay.classList.add('open');
   }
-  function close() { $overlay.classList.remove('open'); }
+  function close() { resetSearch(); $overlay.classList.remove('open'); }
   function backToMaster() {
     setActiveTabId('');
     $overlay.classList.remove('show-detail');
@@ -3297,6 +3342,219 @@ async function setPluginEnabled(id, enabled) {
     el.appendChild(note);
   }
 
+  // ======================================================================
+  // Settings search (VSCode-style): flatten every settings tab into one
+  // filtered list. GENERIC — needs NO per-plugin metadata. The enabling
+  // fact: each settingsTab's render(container) accepts any container and is
+  // synchronous + re-entrant, so we render every tab into a detached node
+  // once per search session and scan its text. Built-in meta tabs
+  // (Plugins/Discover/Layout/About) are matched by TITLE ONLY (their content
+  // is async/network and isn't "settings rows").
+  // ======================================================================
+  let searching = false;
+  let searchCache = null;     // { tabs:[{id,title,container,rows,groupEl}], builtins:[{id,title,groupEl}] }
+  let debTimer = null;
+
+  // Partition a rendered tab into atomic "rows": climb into wrappers that
+  // hold more than one control; stop at any element holding ≤1 control (a
+  // label+control line, a lone control, or a pure description block). This
+  // covers ALL content with no gaps and needs no plugin cooperation.
+  function controlsCount(el) {
+    let n = el.querySelectorAll ? el.querySelectorAll('input,select,textarea,button').length : 0;
+    if (el.matches && el.matches('input,select,textarea,button')) n++;
+    return n;
+  }
+  function decomposeRows(container) {
+    const rows = [];
+    (function visit(el) {
+      const kids = el.children;
+      if (!kids || kids.length === 0) { rows.push(el); return; }
+      for (let i = 0; i < kids.length; i++) {
+        const c = kids[i];
+        if (controlsCount(c) <= 1) rows.push(c);
+        else visit(c);
+      }
+    })(container);
+    rows.forEach(function(r) { if (r.classList) r.classList.add('ss-row'); });
+    return rows;
+  }
+  function rowText(row) {
+    let t = row.textContent || '';
+    const ctrls = row.querySelectorAll ? row.querySelectorAll('input,select,textarea,button') : [];
+    for (let i = 0; i < ctrls.length; i++) {
+      const c = ctrls[i];
+      t += ' ' + (c.getAttribute('placeholder') || '') + ' ' + (c.getAttribute('aria-label') || '') +
+           ' ' + (c.getAttribute('title') || '') + ' ' + (c.value || '');
+    }
+    return t.toLowerCase();
+  }
+
+  function buildSearchCache() {
+    const tabs = [], builtins = [];
+    for (const sec of sections()) {
+      for (const item of sec.items) {
+        if (item.plugin) {
+          const container = document.createElement('div');
+          container.className = 'ss-tabbody';
+          try { item.plugin.render(container); }
+          catch (e) { container.textContent = 'render error: ' + e.message; }
+          tabs.push({ id: item.id, title: item.title, container: container,
+                      rows: decomposeRows(container), groupEl: null });
+        } else {
+          // Built-in meta tab → title-only entry (no content scan).
+          builtins.push({ id: item.id, title: item.title, groupEl: null });
+        }
+      }
+    }
+    return { tabs: tabs, builtins: builtins };
+  }
+  function ensureCache() { if (!searchCache) searchCache = buildSearchCache(); }
+
+  // Strip prior <mark> highlights from a scope and re-merge text nodes.
+  function clearHl(scope) {
+    const marks = scope.querySelectorAll ? scope.querySelectorAll('mark.ss-hl') : [];
+    for (let i = 0; i < marks.length; i++) {
+      const m = marks[i];
+      m.parentNode.replaceChild(document.createTextNode(m.textContent), m);
+    }
+    if (scope.normalize) scope.normalize();
+  }
+  // Wrap query occurrences in <mark> within a row's TEXT nodes only — never
+  // touches controls (their value is a property, not a child text node).
+  function highlight(row, ql) {
+    if (!ql) return;
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(n) {
+        if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        const pn = n.parentNode && n.parentNode.nodeName;
+        if (pn === 'MARK' || pn === 'SCRIPT' || pn === 'STYLE' || pn === 'TEXTAREA') return NodeFilter.FILTER_REJECT;
+        return n.nodeValue.toLowerCase().indexOf(ql) >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    const targets = [];
+    while (walker.nextNode()) targets.push(walker.currentNode);
+    targets.forEach(function(node) {
+      const val = node.nodeValue, lo = val.toLowerCase();
+      const frag = document.createDocumentFragment();
+      let idx, last = 0;
+      while ((idx = lo.indexOf(ql, last)) >= 0) {
+        if (idx > last) frag.appendChild(document.createTextNode(val.slice(last, idx)));
+        const m = document.createElement('mark');
+        m.className = 'ss-hl'; m.textContent = val.slice(idx, idx + ql.length);
+        frag.appendChild(m); last = idx + ql.length;
+      }
+      if (last < val.length) frag.appendChild(document.createTextNode(val.slice(last)));
+      node.parentNode.replaceChild(frag, node);
+    });
+  }
+
+  // Open a tab from a search result: leave search, drill into the real tab.
+  function openTabFromSearch(id) {
+    resetSearch();
+    setActiveTabId(id);
+    $overlay.classList.add('show-detail');
+    render();
+  }
+
+  // Build the results DOM once (per search session); per-keystroke we only
+  // toggle row/group visibility + re-highlight.
+  function enterSearch() {
+    ensureCache();
+    searching = true;
+    $overlay.classList.add('searching');
+    $detail.innerHTML = '';
+    const mkHead = function(title, id) {
+      const h = document.createElement('button');
+      h.type = 'button'; h.className = 'ss-group-head'; h.textContent = title;
+      h.addEventListener('click', function() { openTabFromSearch(id); });
+      return h;
+    };
+    searchCache.tabs.forEach(function(t) {
+      const g = document.createElement('div'); g.className = 'ss-group';
+      g.appendChild(mkHead(t.title, t.id));
+      g.appendChild(t.container);          // move the live container in
+      t.groupEl = g; $detail.appendChild(g);
+    });
+    searchCache.builtins.forEach(function(b) {
+      const g = document.createElement('div'); g.className = 'ss-group';
+      g.appendChild(mkHead(b.title, b.id));
+      b.groupEl = g; $detail.appendChild(g);
+    });
+    const empty = document.createElement('div');
+    empty.className = 'ss-empty'; empty.id = 'ss-empty'; empty.hidden = true;
+    $detail.appendChild(empty);
+  }
+
+  function runFilter(q) {
+    const ql = q.toLowerCase();
+    let matches = 0;
+    searchCache.tabs.forEach(function(t) {
+      clearHl(t.container);
+      const titleMatch = t.title.toLowerCase().indexOf(ql) >= 0;
+      let anyRow = false;
+      t.rows.forEach(function(r) {
+        const hit = titleMatch || rowText(r).indexOf(ql) >= 0;
+        r.classList.toggle('ss-hide', !hit);
+        if (hit) { anyRow = true; matches++; if (!titleMatch) highlight(r, ql); }
+      });
+      // Whole-tab fallback: text matched somewhere we didn't attribute to a
+      // row → reveal the whole tab so nothing is unfindable.
+      if (!anyRow && t.container.textContent.toLowerCase().indexOf(ql) >= 0) {
+        t.rows.forEach(function(r) { r.classList.remove('ss-hide'); });
+        anyRow = true; matches++;
+      }
+      t.groupEl.hidden = !anyRow;
+    });
+    searchCache.builtins.forEach(function(b) {
+      const hit = b.title.toLowerCase().indexOf(ql) >= 0;
+      b.groupEl.hidden = !hit;
+      if (hit) matches++;
+    });
+    const empty = document.getElementById('ss-empty');
+    if (empty) empty.hidden = matches > 0;
+    if (empty && matches === 0) empty.textContent = 'No settings match “' + q + '”.';
+    $searchStatus.textContent = matches + (matches === 1 ? ' result' : ' results');
+  }
+
+  // Leave search mode + restore the normal master/detail view.
+  function resetSearch() {
+    if (debTimer) { clearTimeout(debTimer); debTimer = null; }
+    if ($search) $search.value = '';
+    if ($searchStatus) $searchStatus.textContent = '';
+    searching = false;
+    searchCache = null;
+    $overlay.classList.remove('searching');
+  }
+
+  function onSearchInput() {
+    const q = ($search.value || '').trim();
+    if (!q) {
+      // Cleared: back to normal view (re-render the active tab).
+      if (searching) { searching = false; searchCache = null; $overlay.classList.remove('searching'); render(); }
+      if ($searchStatus) $searchStatus.textContent = '';
+      return;
+    }
+    if (!searching) enterSearch();
+    runFilter(q);
+  }
+
+  if ($search) {
+    $search.addEventListener('input', function() {
+      if (debTimer) clearTimeout(debTimer);
+      debTimer = setTimeout(onSearchInput, 120);
+    });
+    // Esc with a query clears the search first (don't close the overlay);
+    // Esc on an empty box falls through to the global close handler.
+    $search.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && ($search.value || '') !== '') {
+        e.stopPropagation(); e.preventDefault();
+        $search.value = '';
+        if (searching) { searching = false; searchCache = null; $overlay.classList.remove('searching'); render(); }
+        if ($searchStatus) $searchStatus.textContent = '';
+      }
+    });
+  }
+
   // Re-render the open overlay when registries change.
   ['terminalView-registered', 'terminalView-unregistered',
    'settingsTab-registered',  'settingsTab-unregistered',
@@ -3304,7 +3562,16 @@ async function setPluginEnabled(id, enabled) {
    'theme-registered',        'theme-unregistered',
   ].forEach(function(ev) {
     window.ttyview.on(ev, function() {
-      if ($overlay.classList.contains('open')) render();
+      if (!$overlay.classList.contains('open')) return;
+      // In search mode a tab (un)registered → rebuild the flattened results
+      // against the fresh registry instead of repainting the active tab.
+      if (searching) {
+        const q = ($search.value || '').trim();
+        searchCache = null; $detail.innerHTML = ''; searching = false;
+        if (q) { enterSearch(); runFilter(q); }
+        return;
+      }
+      render();
     });
   });
 })();
