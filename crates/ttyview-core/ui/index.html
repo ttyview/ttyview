@@ -3420,19 +3420,24 @@ async function setPluginEnabled(id, enabled) {
     if (scope.normalize) scope.normalize();
   }
   // Wrap query occurrences in <mark> within a row's TEXT nodes only — never
-  // touches controls (their value is a property, not a child text node).
+  // touches controls (their value is a property, not a child text node). A
+  // plain recursive walk (not TreeWalker) — portable across engines/test DOMs.
   function highlight(row, ql) {
     if (!ql) return;
-    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, {
-      acceptNode: function(n) {
-        if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-        const pn = n.parentNode && n.parentNode.nodeName;
-        if (pn === 'MARK' || pn === 'SCRIPT' || pn === 'STYLE' || pn === 'TEXTAREA') return NodeFilter.FILTER_REJECT;
-        return n.nodeValue.toLowerCase().indexOf(ql) >= 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }
-    });
     const targets = [];
-    while (walker.nextNode()) targets.push(walker.currentNode);
+    (function collect(node) {
+      const kids = node.childNodes;
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if (ch.nodeType === 3) {
+          if (ch.nodeValue && ch.nodeValue.toLowerCase().indexOf(ql) >= 0) targets.push(ch);
+        } else if (ch.nodeType === 1) {
+          const nn = ch.nodeName;
+          if (nn === 'MARK' || nn === 'SCRIPT' || nn === 'STYLE' || nn === 'TEXTAREA') continue;
+          collect(ch);
+        }
+      }
+    })(row);
     targets.forEach(function(node) {
       const val = node.nodeValue, lo = val.toLowerCase();
       const frag = document.createDocumentFragment();
