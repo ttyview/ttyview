@@ -96,6 +96,12 @@ pub struct AppState {
     /// advertises manifest/SW presence so the web client can wire up
     /// PWA installability. Empty for the bare daemon.
     pub extra_static: Arc<HashMap<String, Vec<u8>>>,
+    /// Poke the multi-session reconciler to run immediately (instead of
+    /// waiting RECONCILE_INTERVAL). The session-rename endpoint calls
+    /// `notify_one()` after a successful `tmux rename-session` so the new name
+    /// reflects ~instantly (move-to-project regroup). A no-op `Notify` for the
+    /// bare/test daemon that never wires a MultiSession.
+    pub reconcile_now: Arc<tokio::sync::Notify>,
 }
 
 pub fn router(state: AppState) -> Router {

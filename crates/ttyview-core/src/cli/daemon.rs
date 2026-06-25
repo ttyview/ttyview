@@ -244,6 +244,11 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     // Start the idle sweep (no-op unless idle_event_threshold is Some).
     store.spawn_idle_sweep();
 
+    // Reconcile-poke handle for the session-rename fast-path. Real value is
+    // taken from MultiSession below (non-demo); demo mode has no reconciler so
+    // this stays a no-op Notify (the rename endpoint is FORBIDDEN there anyway).
+    let mut reconcile_now = std::sync::Arc::new(tokio::sync::Notify::new());
+
     if demo_mode {
         // No tmux. Seed five synthetic panes so the picker / pinned-
         // tabs row / pane counter feel populated. The cc-transcript
@@ -289,6 +294,9 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         let (_multi, mut rx) = MultiSession::spawn(socket.map(String::from), Some(store.clone()))
             .await
             .context("starting multi-session tmux source")?;
+        // Wire the reconcile-poke into AppState (rename fast-path) before the
+        // handle is forgotten below — the Notify is an Arc, so it survives.
+        reconcile_now = _multi.reconcile_now();
 
         let store_for_ingest = store.clone();
         tokio::spawn(async move {
@@ -362,6 +370,7 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
         allowed_origins,
         state: state_store,
         extra_static: std::sync::Arc::new(extra_static.into_iter().collect()),
+        reconcile_now,
     });
     // Embedder-mounted routes (mobile-cc's /api/cc-search, future Web
     // Push). Applied last so they sit on top of the finished router;

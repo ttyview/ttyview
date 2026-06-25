@@ -176,11 +176,19 @@ async fn rename_session(
     }
     cmd.args(["rename-session", "-t", &name, &req.to]);
     match cmd.output() {
-        Ok(out) if out.status.success() => Json(OkResp {
-            ok: true,
-            name: Some(req.to),
-        })
-        .into_response(),
+        Ok(out) if out.status.success() => {
+            // Fast-path: poke the multi-session reconciler so the new name is
+            // reflected in /panes within one reconcile instead of waiting out
+            // RECONCILE_INTERVAL (move-to-project regroup feels instant). tmux
+            // 3.4 emits no %session-renamed to control clients, so triggering
+            // the existing full reconcile is the version-independent path.
+            state.reconcile_now.notify_one();
+            Json(OkResp {
+                ok: true,
+                name: Some(req.to),
+            })
+            .into_response()
+        }
         Ok(out) => {
             tracing::warn!(
                 "tmux rename-session failed: {}",

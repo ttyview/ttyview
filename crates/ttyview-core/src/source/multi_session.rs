@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -66,6 +66,11 @@ pub struct MultiSession {
     socket: Option<String>,
     sessions: Arc<Mutex<HashMap<String, ChildHandle>>>,
     tx: mpsc::Sender<SourceEvent>,
+    /// Poked (notify_one) to force an immediate reconcile instead of waiting
+    /// out RECONCILE_INTERVAL — the session-rename fast-path (tmux 3.4 emits
+    /// no %session-renamed to control clients, so a poke from the rename
+    /// endpoint is the version-independent way to reflect a rename instantly).
+    reconcile_now: Arc<Notify>,
     _reconciler: JoinHandle<()>,
     /// Optional handle to the PaneStore. When present, mid-life session
     /// attaches (e.g. after a tmux server restart introduces a fresh
@@ -103,6 +108,7 @@ impl MultiSession {
     ) -> Result<(Self, mpsc::Receiver<SourceEvent>)> {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         let sessions = Arc::new(Mutex::new(HashMap::<String, ChildHandle>::new()));
+        let reconcile_now = Arc::new(Notify::new());
 
         // Initial attach — if this fails (e.g. tmux server not running), we
         // still return successfully; the reconciler will retry every 5s.
@@ -122,9 +128,19 @@ impl MultiSession {
         let reconciler_sessions = sessions.clone();
         let reconciler_tx = tx.clone();
         let reconciler_store = store.clone();
+        let reconciler_notify = reconcile_now.clone();
         let reconciler = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(RECONCILE_INTERVAL).await;
+                // Wake on the periodic tick OR an explicit poke. The poke
+                // (reconcile_now.notify_one() from the rename endpoint) makes a
+                // session rename reflect within one reconcile instead of up to
+                // RECONCILE_INTERVAL — tmux 3.4 sends no %session-renamed to
+                // control clients, so triggering the existing full reconcile is
+                // the version-independent fast-path.
+                tokio::select! {
+                    _ = tokio::time::sleep(RECONCILE_INTERVAL) => {}
+                    _ = reconciler_notify.notified() => {}
+                }
                 if reconciler_tx.is_closed() {
                     break;
                 }
@@ -146,11 +162,19 @@ impl MultiSession {
                 socket,
                 sessions,
                 tx,
+                reconcile_now,
                 _reconciler: reconciler,
                 _store: store,
             },
             rx,
         ))
+    }
+
+    /// A handle the API layer pokes (`notify_one()`) to force an immediate
+    /// reconcile rather than waiting out `RECONCILE_INTERVAL`. Used by the
+    /// session-rename endpoint so move-to-project regroup reflects ~instantly.
+    pub fn reconcile_now(&self) -> Arc<Notify> {
+        self.reconcile_now.clone()
     }
 
     /// Names of sessions we currently observe. Useful for tests + diagnostics.
