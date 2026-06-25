@@ -92,10 +92,22 @@ async fn create_session(
         return err(StatusCode::CONFLICT, "session already exists").into_response();
     }
     if let Some(cwd) = req.cwd.as_deref() {
-        if !is_valid_cwd(cwd) {
+        if !cwd_is_safe_abs(cwd) {
             return err(
                 StatusCode::BAD_REQUEST,
-                "cwd must be an absolute path to an existing directory",
+                "cwd must be an absolute path (no '..')",
+            )
+            .into_response();
+        }
+        // "Claude in a project" should be able to spin up a BRAND-NEW project
+        // folder, not silently fail when it doesn't exist yet. mkdir -p the
+        // target before tmux uses it (-c). Single-user loopback daemon: creating
+        // a directory the user explicitly asked for is within their authority.
+        if let Err(e) = std::fs::create_dir_all(cwd) {
+            tracing::warn!("create_dir_all({cwd}) failed: {e}");
+            return err(
+                StatusCode::BAD_REQUEST,
+                "could not create the project directory (check the path)",
             )
             .into_response();
         }
@@ -245,14 +257,11 @@ fn is_valid_session_name(s: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
-/// cwd validation: must be an absolute path that exists and is a
-/// directory. tmux silently falls back to `HOME` for bad paths,
-/// which would be confusing UX.
-fn is_valid_cwd(s: &str) -> bool {
-    if !s.starts_with('/') {
-        return false;
-    }
-    std::fs::metadata(s).map(|m| m.is_dir()).unwrap_or(false)
+/// A cwd we're willing to `mkdir -p` and hand to tmux `-c`: absolute, no
+/// `..` traversal, no NUL. It need NOT already exist — create_session creates
+/// it (so "Claude in a project" can spin up a brand-new project folder).
+fn cwd_is_safe_abs(s: &str) -> bool {
+    s.starts_with('/') && !s.contains('\0') && !s.contains("..")
 }
 
 /// Cheap existence check via `tmux has-session -t NAME`. Returns
@@ -300,11 +309,11 @@ mod tests {
     }
 
     #[test]
-    fn cwd_validation_requires_absolute_existing_dir() {
-        assert!(!is_valid_cwd(""));
-        assert!(!is_valid_cwd("relative/path"));
-        assert!(!is_valid_cwd("/nonexistent/path/that/should/never/exist"));
-        // /tmp should reliably exist on Linux test runners.
-        assert!(is_valid_cwd("/tmp"));
+    fn cwd_safe_abs_accepts_absolute_rejects_traversal() {
+        assert!(cwd_is_safe_abs("/tmp"));
+        assert!(cwd_is_safe_abs("/home/me/projects/new-app")); // need not exist — we mkdir it
+        assert!(!cwd_is_safe_abs(""));
+        assert!(!cwd_is_safe_abs("relative/path"));
+        assert!(!cwd_is_safe_abs("/has/../traversal"));
     }
 }

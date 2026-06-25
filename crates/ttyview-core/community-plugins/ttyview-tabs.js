@@ -1036,6 +1036,15 @@
       render();
       return true;
     };
+    // Re-read pins from the synced storage namespace into the in-memory cache
+    // and re-render. Lets mobile-cc's "Move to project" regroup a renamed tab
+    // LIVE instead of a full-page reload: the caller has already written the
+    // migrated pins to storage (storage('ttyview-tabs').set('pins', …)), so we
+    // just refresh what render() reads. No-op-safe when storage has no array.
+    window.ttvTabsReloadPins = function () {
+      try { const v = storage.get(STORAGE_KEY); if (Array.isArray(v)) pins = v; } catch (_) {}
+      render();
+    };
   } catch (_) {}
 
   function render() {
