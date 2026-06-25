@@ -253,6 +253,85 @@ pub struct PaneStore {
     /// once a pane that produced output goes quiet for this long. `None`
     /// = no idle sweep (the default; mobile-cc opts in).
     idle_threshold: Option<std::time::Duration>,
+    /// Optional JSONL diag sink for the scrollback-duplication probe.
+    /// `None` = no instrumentation. Shared across `PaneStore` clones (the
+    /// broadcaster + the apply loop both write to it).
+    diag: Option<Arc<DiagWriter>>,
+}
+
+/// Lightweight JSONL diagnostic sink for the scrollback-duplication
+/// investigation. One object per line to the daemon's diag log (mobile-cc
+/// points this at `<config_dir>/diag.jsonl`). Purely observational — added
+/// to ground the "duplicate rows" bug in DATA rather than guesses. Stable
+/// fields: {ts, module:"scrollback", event:"push"|"resize"|"cc-reemit-drop",
+/// pane, …}. `push` events carry `dup_of_recent` — how many of the
+/// just-pushed rows match a recently-pushed row (the duplicate-storm signal).
+struct DiagWriter {
+    file: tokio::sync::Mutex<tokio::fs::File>,
+    /// pane id → ring of recent pushed-row hashes (for dup detection).
+    recent: std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<u32>>>,
+}
+
+impl DiagWriter {
+    async fn open(path: &std::path::Path) -> Option<Arc<Self>> {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .ok()?;
+        Some(Arc::new(DiagWriter {
+            file: tokio::sync::Mutex::new(file),
+            recent: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }))
+    }
+
+    async fn log(&self, value: serde_json::Value) {
+        use tokio::io::AsyncWriteExt;
+        let mut line = value.to_string();
+        line.push('\n');
+        let mut f = self.file.lock().await;
+        let _ = f.write_all(line.as_bytes()).await;
+    }
+
+    /// Count how many of `hashes` were seen recently for this pane, then
+    /// record them in the per-pane ring (cap 512).
+    fn dup_of_recent(&self, pane: &str, hashes: &[u32]) -> usize {
+        let mut map = match self.recent.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        let ring = map.entry(pane.to_string()).or_default();
+        let dups = hashes.iter().filter(|h| ring.contains(h)).count();
+        for h in hashes {
+            ring.push_back(*h);
+        }
+        while ring.len() > 512 {
+            ring.pop_front();
+        }
+        dups
+    }
+}
+
+/// Unix epoch millis (best-effort) for diag timestamps.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Render a scrollback row's cells to text (skip wide-char continuations,
+/// trim trailing spaces) — mirrors `Line::render_text` for a bare cell row.
+fn cells_text(cells: &[Cell]) -> String {
+    let mut s = String::with_capacity(cells.len());
+    for c in cells {
+        if c.is_continuation() {
+            continue;
+        }
+        s.push(c.ch);
+    }
+    s.trim_end_matches(' ').to_string()
 }
 
 struct BytesTracer {
@@ -326,6 +405,7 @@ impl PaneStore {
             tracer: None,
             on_semantic: None,
             idle_threshold: None,
+            diag: None,
         }
     }
 
@@ -416,6 +496,16 @@ impl PaneStore {
         self.tracer = BytesTracer::from_env().await;
     }
 
+    /// Point the scrollback-duplication diag probe at `path` (the daemon's
+    /// diag log). No-op if `path` is None or the file can't be opened. Must
+    /// be called BEFORE the store is cloned into the broadcaster so all
+    /// clones share the sink.
+    pub async fn install_diag_log(&mut self, path: Option<std::path::PathBuf>) {
+        if let Some(p) = path {
+            self.diag = DiagWriter::open(&p).await;
+        }
+    }
+
     pub fn list(&self) -> Vec<PaneId> {
         self.panes.iter().map(|e| e.key().clone()).collect()
     }
@@ -501,6 +591,17 @@ impl PaneStore {
                         // before; stderr always lands.
                         tracing::info!("cc-reemit-drop: pane={pane_id} bytes={dropped_bytes}");
                         eprintln!("cc-reemit-drop: pane={pane_id} bytes={dropped_bytes}");
+                        // Instrumentation: correlate dropped re-emissions with
+                        // scrollback-push storms. If dups appear WITHOUT drops
+                        // firing, the drop heuristic is missing a re-emission.
+                        if let Some(diag) = &self.diag {
+                            diag.log(serde_json::json!({
+                                "ts": now_ms(), "module": "scrollback",
+                                "event": "cc-reemit-drop",
+                                "pane": pane_id, "bytes": dropped_bytes,
+                            }))
+                            .await;
+                        }
                         // Do NOT feed the parser, do NOT push to scrollback,
                         // do NOT broadcast. Subscribers see nothing — same
                         // as if CC hadn't emitted at all (which is the bug's
@@ -562,6 +663,17 @@ impl PaneStore {
                 }
             }
             SourceEvent::Resized { pane, rows, cols } => {
+                // Instrumentation (duplicate-rows bug): resize churn is the
+                // suspected trigger (mobile SIGWINCH → reseed → cursor parked
+                // at bottom → CC's relative redraw duplicates). Logged BEFORE
+                // the lock so it captures every resize, including no-ops.
+                if let Some(diag) = &self.diag {
+                    diag.log(serde_json::json!({
+                        "ts": now_ms(), "module": "scrollback", "event": "resize",
+                        "pane": pane.0, "to_rows": rows, "to_cols": cols,
+                    }))
+                    .await;
+                }
                 let slot = self.ensure(&pane);
                 let mut s = slot.state.write().await;
                 let cur_rows = s.term.screen.rows();
@@ -591,8 +703,25 @@ impl PaneStore {
                         // exactly what the re-seed froze into primary.
                         let cap_hash = fnv1a_32(&reseed);
                         let cap_len = reseed.len();
+                        // tmux's REAL cursor (queried adjacent to the capture).
+                        // feed_baseline below replays the capture line-by-line, so
+                        // after the prompt + trailing blank rows the cursor ends at
+                        // the BOTTOM — but the shell's cursor is wherever it actually
+                        // left it (typically the prompt row). Without restoring it,
+                        // the shell's cursor-RELATIVE SIGWINCH prompt-redraw reprints
+                        // at the bottom = a duplicate prompt the real terminal never
+                        // had (two-prompts bug, 2026-06-25; same reseed/cursor-
+                        // consistency family as the black-band artifact).
+                        let real_cursor =
+                            capture_pane_cursor(self.tmux_socket.clone(), pane.0.clone()).await;
                         let mut s = slot.state.write().await;
                         crate::feed_baseline(&mut s.term, &reseed);
+                        if let Some((cy, cx)) = real_cursor {
+                            let maxr = s.term.screen.rows().saturating_sub(1);
+                            let maxc = s.term.screen.cols().saturating_sub(1);
+                            s.term.screen.cursor.row = cy.min(maxr);
+                            s.term.screen.cursor.col = cx.min(maxc);
+                        }
                         let gen = s.term.screen.generation;
                         let alt = s.term.screen.alt_active();
                         let row = s.term.screen.cursor.row;
@@ -824,6 +953,33 @@ pub async fn run_cell_diff_broadcaster(store: PaneStore) {
                 });
             }
             if !sb_rows.is_empty() {
+                // Instrumentation (duplicate-rows bug): log every scrollback
+                // push with a dup-of-recent count BEFORE sb_rows is moved into
+                // the wire event. A burst of pushes with high dup_of_recent —
+                // especially right after a `resize` event — is the signature
+                // of the CC-re-render-into-scrollback storm. Purely
+                // observational; the push itself is unchanged.
+                if let Some(diag) = &store.diag {
+                    let hashes: Vec<u32> = sb_rows
+                        .iter()
+                        .map(|cells| fnv1a_32(cells_text(cells).as_bytes()))
+                        .collect();
+                    let dups = diag.dup_of_recent(&pane_id.0, &hashes);
+                    let sample: String = sb_rows
+                        .first()
+                        .map(|c| cells_text(c).chars().take(80).collect())
+                        .unwrap_or_default();
+                    diag.log(serde_json::json!({
+                        "ts": now_ms(), "module": "scrollback", "event": "push",
+                        "pane": pane_id.0,
+                        "rows_added": sb_rows.len(),
+                        "from_count": prev.last_scrollback_count,
+                        "to_count": cur_sb_count,
+                        "dup_of_recent": dups,
+                        "sample": sample,
+                    }))
+                    .await;
+                }
                 let _ = slot.tx.send(LiveEvent::ScrollbackAppend {
                     pane: pane_id.0.clone(),
                     from_count: prev.last_scrollback_count,
@@ -1074,6 +1230,37 @@ async fn capture_pane_baseline(socket: Option<String>, pane: String) -> Option<V
         return None;
     }
     Some(out.stdout)
+}
+
+/// tmux's real cursor position for a pane, as (row, col) 0-based. Used by the
+/// resize reseed to put the rebuilt term's cursor where the shell actually has
+/// it — `feed_baseline` otherwise parks it at the bottom (after the capture's
+/// trailing blank rows), which makes the shell's cursor-relative SIGWINCH
+/// redraw duplicate the prompt. None on any tmux error.
+async fn capture_pane_cursor(socket: Option<String>, pane: String) -> Option<(u16, u16)> {
+    let mut cmd = tokio::process::Command::new("tmux");
+    if let Some(s) = &socket {
+        cmd.arg("-L").arg(s);
+    }
+    let out = cmd
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{cursor_y} #{cursor_x}",
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut it = s.split_whitespace();
+    let y = it.next()?.parse::<u16>().ok()?;
+    let x = it.next()?.parse::<u16>().ok()?;
+    Some((y, x))
 }
 
 fn broadcast_output(

@@ -234,6 +234,12 @@ async fn run_with_options_inner(opts: RunOptions) -> Result<()> {
     store.set_max_scrollback(max_scrollback);
     store.set_on_semantic(on_semantic);
     store.set_idle_threshold(idle_event_threshold);
+    // Scrollback-duplication probe → the daemon's diag log (mobile-cc points
+    // it at <config_dir>/diag.jsonl). Must precede the broadcaster spawn so
+    // every clone shares the sink.
+    store
+        .install_diag_log(diag_log.map(|p| p.to_path_buf()))
+        .await;
     store.install_tracer_from_env().await;
     // Start the idle sweep (no-op unless idle_event_threshold is Some).
     store.spawn_idle_sweep();
